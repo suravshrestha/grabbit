@@ -1,0 +1,11 @@
+node_modules
+dist
+.wxt
+target
+apps/extension/.output
+*.tsbuildinfo
+
+# Bundled binaries fetched per-platform
+apps/desktop/src-tauri/resources/yt-dlp*
+apps/desktop/src-tauri/resources/ffmpeg*
+!apps/desktop/src-tauri/resources/.gitkeep

@@ -1,0 +1,7 @@
+{
+  "*.{ts,tsx}": [
+    "eslint --fix --ignore-pattern eslint.config.ts --ignore-pattern prettier.config.ts",
+    "node --import tsx ./node_modules/prettier/bin/prettier.cjs --write"
+  ],
+  "*.{json,md,yaml,yml}": ["node --import tsx ./node_modules/prettier/bin/prettier.cjs --write"]
+}

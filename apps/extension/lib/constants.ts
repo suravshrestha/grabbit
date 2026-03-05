@@ -1,0 +1,10 @@
+export const IPC_PORT = 47891
+export const IPC_BASE_URL = `http://localhost:${IPC_PORT}`
+export const POLL_INTERVAL_MS = 1500
+export const EXTENSION_VERSION = '0.1.0'
+
+export const MESSAGE_TYPES = {
+  CHECK_DESKTOP_APP: 'CHECK_DESKTOP_APP',
+  GET_VIDEO_INFO: 'GET_VIDEO_INFO',
+  CONTENT_VIDEO_METADATA: 'CONTENT_VIDEO_METADATA',
+} as const
