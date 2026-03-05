@@ -7,7 +7,7 @@ import unicorn from 'eslint-plugin-unicorn'
 
 export default tseslint.config(
   {
-    ignores: ['**/dist/**', '**/target/**', '**/.wxt/**', '**/src-tauri/gen/**'],
+    ignores: ['**/dist/**', '**/target/**', '**/.wxt/**', '**/.output/**', '**/src-tauri/gen/**'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
@@ -61,6 +61,7 @@ export default tseslint.config(
             '^useCurrentTab\\.ts$',
             '^useDownload\\.ts$',
             '^useDesktopApp\\.ts$',
+            '^useQueue\\.ts$',
             '^README\\.md$',
           ],
         },

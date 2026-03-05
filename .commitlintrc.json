@@ -6,10 +6,6 @@
       "always",
       ["feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert"]
     ],
-    "scope-enum": [
-      2,
-      "always",
-      ["extension", "desktop", "shared", "ui", "deps", "release"]
-    ]
+    "scope-enum": [2, "always", ["extension", "desktop", "shared", "ui", "deps", "release"]]
   }
 }

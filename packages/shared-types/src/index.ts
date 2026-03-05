@@ -1,6 +1,12 @@
 export type DownloadFormat = 'mp4' | 'mp3' | 'srt' | 'vtt'
 
-export type DownloadStatus = 'queued' | 'downloading' | 'merging' | 'complete' | 'error' | 'cancelled'
+export type DownloadStatus =
+  | 'queued'
+  | 'downloading'
+  | 'merging'
+  | 'complete'
+  | 'error'
+  | 'cancelled'
 
 export interface DownloadRequest {
   videoId: string

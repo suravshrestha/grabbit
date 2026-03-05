@@ -1,6 +1,7 @@
 # Grabbit
 
 Grabbit is a local-first YouTube downloader with two parts:
+
 - Chrome extension (`apps/extension`) as the user-facing UX.
 - Tauri desktop app (`apps/desktop`) as the native download engine.
 
@@ -47,6 +48,20 @@ Load unpacked extension from `apps/extension/.output/chrome-mv3` in `chrome://ex
 pnpm build:extension
 pnpm build:desktop
 ```
+
+## SonarQube CI/CD
+
+The repository includes `.github/workflows/sonarqube.yml` for push + pull request analysis on `main`.
+
+Required GitHub repository secrets:
+
+- `SONAR_HOST_URL` (example: `https://sonarqube.example.com`)
+- `SONAR_TOKEN` (project analysis token generated in SonarQube)
+
+Recommended repository settings:
+
+- Protect `main` and require the SonarQube check to pass before merge.
+- Keep the GitHub Action permission scope minimal (already set in workflow).
 
 ## Conventional Commit Examples
 
