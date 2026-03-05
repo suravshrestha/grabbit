@@ -148,8 +148,13 @@ async fn status(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
   validate_localhost(addr)?;
   let id = uuid::Uuid::parse_str(&job_id).map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
-  let jobs = context.state.jobs.lock().await;
-  let job = jobs.get(&id).ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+  let job = {
+    let jobs = context.state.jobs.lock().await;
+    jobs
+      .get(&id)
+      .cloned()
+      .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?
+  };
   Ok(Json(job))
 }
 

@@ -58,13 +58,36 @@ pub async fn enqueue_download(app: AppHandle, state: AppState) -> Result<(), Str
   let app_clone = app.clone();
   let state_clone = state.clone();
   tauri::async_runtime::spawn(async move {
-    if let Err(err) = run_download_job(app_clone.clone(), state_clone.clone(), job_id).await {
-      error!("download failed: {err}");
+    let mut current_job_id = Some(job_id);
+    while let Some(active_job_id) = current_job_id {
+      if let Err(err) = run_download_job(app_clone.clone(), state_clone.clone(), active_job_id).await {
+        error!("download failed: {err}");
+      }
+
+      {
+        let mut active = state_clone.active_job.lock().await;
+        *active = None;
+      }
+
+      current_job_id = {
+        let order = state_clone.order.lock().await;
+        let jobs = state_clone.jobs.lock().await;
+        order
+          .iter()
+          .find(|next_job_id| {
+            jobs
+              .get(next_job_id)
+              .map(|job| matches!(job.status, DownloadStatus::Queued))
+              .unwrap_or(false)
+          })
+          .copied()
+      };
+
+      if let Some(next_job_id) = current_job_id {
+        let mut active = state_clone.active_job.lock().await;
+        *active = Some(next_job_id);
+      }
     }
-    let mut active = state_clone.active_job.lock().await;
-    *active = None;
-    drop(active);
-    let _ = enqueue_download(app_clone, state_clone).await;
   });
 
   Ok(())
@@ -81,7 +104,7 @@ pub async fn get_video_info(app: &AppHandle, video_id: &str) -> Result<Value, St
     .await
     .map_err(|error| DownloaderError::Process(error.to_string()))?;
 
-  if output.code != 0 {
+  if output.status.code() != Some(0) {
     return Err(DownloaderError::Process(String::from_utf8_lossy(&output.stderr).to_string()).into());
   }
 
@@ -130,12 +153,15 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
     .spawn()
     .map_err(|error| DownloaderError::Process(error.to_string()))?;
 
+  let mut child = Some(child);
   let mut success = false;
   let mut cancelled = false;
   while let Some(event) = rx.recv().await {
     if is_job_cancelled(&state, job_id).await? {
-      if let Err(err) = child.kill() {
-        error!("failed to kill process after cancellation: {err}");
+      if let Some(process) = child.take() {
+        if let Err(err) = process.kill() {
+          error!("failed to kill process after cancellation: {err}");
+        }
       }
       cancelled = true;
       break;
@@ -169,8 +195,10 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
   }
 
   if !success && !cancelled {
-    if let Err(err) = child.kill() {
-      error!("failed to kill process: {err}");
+    if let Some(process) = child.take() {
+      if let Err(err) = process.kill() {
+        error!("failed to kill process: {err}");
+      }
     }
   }
 
@@ -253,6 +281,20 @@ fn build_download_args(
 }
 
 fn default_download_dir() -> Option<String> {
+  if cfg!(target_os = "windows") {
+    if let Ok(user_profile) = std::env::var("USERPROFILE") {
+      return Some(format!("{user_profile}\\Downloads"));
+    }
+
+    let home_drive = std::env::var("HOMEDRIVE").ok();
+    let home_path = std::env::var("HOMEPATH").ok();
+    if let (Some(drive), Some(path)) = (home_drive, home_path) {
+      return Some(format!("{drive}{path}\\Downloads"));
+    }
+
+    return None;
+  }
+
   std::env::var("HOME").ok().map(|home| format!("{home}/Downloads"))
 }
 

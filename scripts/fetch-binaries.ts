@@ -20,6 +20,49 @@ function detectPlatform(): { platform: NodeJS.Platform; arch: string } {
   return { platform: process.platform, arch: process.arch }
 }
 
+async function detectTargetTriple(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('rustc', ['--print', 'host-tuple'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: process.platform === 'win32',
+    })
+    let stdout = ''
+    let stderr = ''
+
+    child.stdout.on('data', (chunk: unknown) => {
+      if (typeof chunk === 'string') {
+        stdout += chunk
+        return
+      }
+      if (Buffer.isBuffer(chunk)) {
+        stdout += chunk.toString()
+      }
+    })
+    child.stderr.on('data', (chunk: unknown) => {
+      if (typeof chunk === 'string') {
+        stderr += chunk
+        return
+      }
+      if (Buffer.isBuffer(chunk)) {
+        stderr += chunk.toString()
+      }
+    })
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`rustc --print host-tuple failed (${code}): ${stderr.trim()}`))
+        return
+      }
+      const value = stdout.trim()
+      if (!value) {
+        reject(new Error('rustc --print host-tuple returned empty output'))
+        return
+      }
+      resolve(value)
+    })
+  })
+}
+
 async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url, {
     headers: {
@@ -72,7 +115,10 @@ function ffmpegUrl(platform: NodeJS.Platform, arch: string): string {
     if (arch === 'x64') {
       return 'https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz'
     }
-    return 'https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-i686-static.tar.xz'
+    if (arch === 'ia32') {
+      return 'https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-i686-static.tar.xz'
+    }
+    throw new Error(`Unsupported Linux architecture: ${arch}`)
   }
   throw new Error(`Unsupported platform: ${platform}`)
 }
@@ -191,6 +237,7 @@ async function printYtDlpVersion(binaryPath: string): Promise<string> {
 
 async function main(): Promise<void> {
   const { platform, arch } = detectPlatform()
+  const targetTriple = await detectTargetTriple()
   await mkdir(RESOURCE_DIR, { recursive: true })
 
   const release = await fetchJson<GithubRelease>(GITHUB_API)
@@ -199,6 +246,13 @@ async function main(): Promise<void> {
   await downloadToFile(ytDlpAsset.browser_download_url, ytDlpPath)
   if (platform !== 'win32') {
     await chmod(ytDlpPath, 0o755)
+  }
+  const ytDlpBundledName =
+    platform === 'win32' ? `yt-dlp-${targetTriple}.exe` : `yt-dlp-${targetTriple}`
+  const ytDlpBundledPath = join(RESOURCE_DIR, ytDlpBundledName)
+  await copyFile(ytDlpPath, ytDlpBundledPath)
+  if (platform !== 'win32') {
+    await chmod(ytDlpBundledPath, 0o755)
   }
 
   const archivePath = join(tmpdir(), archiveName(platform))
@@ -213,6 +267,13 @@ async function main(): Promise<void> {
   if (platform !== 'win32') {
     await chmod(ffmpegPath, 0o755)
   }
+  const ffmpegBundledName =
+    platform === 'win32' ? `ffmpeg-${targetTriple}.exe` : `ffmpeg-${targetTriple}`
+  const ffmpegBundledPath = join(RESOURCE_DIR, ffmpegBundledName)
+  await copyFile(ffmpegPath, ffmpegBundledPath)
+  if (platform !== 'win32') {
+    await chmod(ffmpegBundledPath, 0o755)
+  }
 
   await rm(archivePath, { force: true })
   await rm(extractDir, { recursive: true, force: true })
@@ -221,6 +282,7 @@ async function main(): Promise<void> {
   console.log(`Fetched yt-dlp ${release.tag_name} to ${ytDlpPath}`)
   console.log(`yt-dlp --version => ${version}`)
   console.log(`Fetched ffmpeg to ${ffmpegPath}`)
+  console.log(`Prepared Tauri externalBin sidecars for target ${targetTriple}`)
 }
 
 void main().catch((error: unknown) => {

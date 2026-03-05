@@ -41,7 +41,13 @@ export function useDownload(): UseDownloadState {
 
       await fetchStatus()
       timerRef.current = window.setInterval(() => {
-        void fetchStatus()
+        void fetchStatus().catch((pollError: unknown) => {
+          stopPolling()
+          setLoading(false)
+          setError(
+            pollError instanceof Error ? pollError.message : 'Failed to fetch download status',
+          )
+        })
       }, POLL_INTERVAL_MS)
     } catch (downloadError) {
       setLoading(false)
