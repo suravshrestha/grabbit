@@ -1,5 +1,4 @@
 import { defineBackground } from '#imports'
-import type { Browser } from 'wxt/browser'
 import { checkDesktopHealth, fetchVideoInfo } from '@/lib/ipc'
 import { MESSAGE_TYPES } from '@/lib/constants'
 
@@ -9,7 +8,7 @@ interface ExtensionMessage {
 }
 
 chrome.runtime.onMessage.addListener(
-  (message: ExtensionMessage, _sender: Browser.runtime.MessageSender, sendResponse): boolean => {
+  (message: ExtensionMessage, _sender: chrome.runtime.MessageSender, sendResponse): boolean => {
     if (message.type === MESSAGE_TYPES.CHECK_DESKTOP_APP) {
       void checkDesktopHealth().then((isRunning) => {
         sendResponse({ isRunning })
@@ -32,7 +31,7 @@ chrome.runtime.onMessage.addListener(
   },
 )
 
-chrome.alarms.create('grabbit-keep-alive', { periodInMinutes: 1 })
+void chrome.alarms.create('grabbit-keep-alive', { periodInMinutes: 1 })
 chrome.alarms.onAlarm.addListener(() => {
   void chrome.runtime.getPlatformInfo()
 })

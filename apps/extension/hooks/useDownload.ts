@@ -4,9 +4,9 @@ import { createDownloadJob, getDownloadStatus } from '@/lib/ipc'
 import { POLL_INTERVAL_MS } from '@/lib/constants'
 
 interface UseDownloadState {
-  job?: DownloadJob
+  job: DownloadJob | undefined
   loading: boolean
-  error?: string
+  error: string | undefined
   startDownload: (request: DownloadRequest) => Promise<void>
 }
 

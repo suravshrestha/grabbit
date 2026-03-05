@@ -9,6 +9,9 @@
     "build:extension": "pnpm --filter @grabbit/extension build",
     "build:desktop": "pnpm --filter @grabbit/desktop tauri build",
     "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "node --import tsx ./node_modules/prettier/bin/prettier.cjs --write .",
+    "test": "pnpm -r test --if-present",
     "typecheck": "pnpm -r typecheck",
     "prepare": "husky",
     "fetch-binaries": "tsx scripts/fetch-binaries.ts"

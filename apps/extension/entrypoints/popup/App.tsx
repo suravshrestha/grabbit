@@ -51,8 +51,12 @@ export function App(): JSX.Element {
       videoId,
       url: currentTab.url,
       format,
-      quality: format === 'mp4' ? quality : undefined,
-      subtitleLang: format === 'srt' || format === 'vtt' ? subtitleLang : undefined,
+    }
+    if (format === 'mp4') {
+      payload.quality = quality
+    }
+    if (format === 'srt' || format === 'vtt') {
+      payload.subtitleLang = subtitleLang
     }
     await startDownload(payload)
   }

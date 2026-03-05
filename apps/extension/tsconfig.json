@@ -6,7 +6,7 @@
     "paths": {
       "@/*": ["./*"]
     },
-    "types": ["chrome", "wxt/client"],
+    "types": ["chrome"],
     "composite": true
   },
   "include": ["**/*.ts", "**/*.tsx"]

@@ -1,7 +1,6 @@
 import { defineConfig } from 'wxt'
 
 export default defineConfig({
-  extensionApi: 'chrome',
   manifest: {
     name: 'Grabbit',
     description: 'Download YouTube videos, audio, and subtitles through Grabbit desktop.',
@@ -15,7 +14,7 @@ export default defineConfig({
   vite: () => ({
     resolve: {
       alias: {
-        '@': new URL('./', import.meta.url).pathname,
+        '@': '/',
       },
     },
   }),
