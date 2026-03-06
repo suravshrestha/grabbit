@@ -7,6 +7,7 @@ use crate::{
 };
 use chrono::Utc;
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_shell::{process::CommandEvent, ShellExt};
 use thiserror::Error;
@@ -114,21 +115,45 @@ pub async fn get_video_info(app: &AppHandle, video_id: &str) -> Result<VideoInfo
 }
 
 async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -> Result<(), String> {
-  let (request, output_template) = {
+  let request = {
     let mut jobs = state.jobs.lock().await;
     let job = jobs.get_mut(&job_id).ok_or_else(|| "job not found".to_string())?;
     job.status = DownloadStatus::Downloading;
-    let dir = job
-      .request
-      .output_dir
-      .clone()
-      .or_else(default_download_dir)
-      .unwrap_or_else(|| "~/Downloads".to_string());
-    let template = format!("{dir}/%(title)s.%(ext)s");
-    (job.request.clone(), template)
+    job.error = None;
+    job.request.clone()
   };
 
-  let ytdlp = resolve_binary_path(&app, yt_dlp_binary_name()).map_err(DownloaderError::Resource)?;
+  let output_dir = match resolve_output_dir(request.output_dir.as_deref()) {
+    Ok(path) => path,
+    Err(message) => {
+      mark_job_failed(&app, &state, job_id, message).await?;
+      return Ok(());
+    }
+  };
+
+  if let Err(message) = ensure_output_directory_writable(&output_dir) {
+    mark_job_failed(&app, &state, job_id, message).await?;
+    return Ok(());
+  }
+
+  let output_template = output_dir
+    .join("%(title)s.%(ext)s")
+    .to_string_lossy()
+    .to_string();
+
+  let ytdlp = match resolve_binary_path(&app, yt_dlp_binary_name()) {
+    Ok(path) => path,
+    Err(error) => {
+      mark_job_failed(
+        &app,
+        &state,
+        job_id,
+        DownloaderError::Resource(error).to_string(),
+      )
+      .await?;
+      return Ok(());
+    }
+  };
   let mut args = build_download_args(
     &request.url,
     &request.format,
@@ -144,16 +169,29 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
     "--newline".to_string(),
   ]);
 
-  let (mut rx, child) = app
+  let (mut rx, child) = match app
     .shell()
     .command(ytdlp.to_string_lossy().to_string())
     .args(args)
     .spawn()
-    .map_err(|error| DownloaderError::Process(error.to_string()))?;
+  {
+    Ok(tuple) => tuple,
+    Err(error) => {
+      mark_job_failed(
+        &app,
+        &state,
+        job_id,
+        DownloaderError::Process(error.to_string()).to_string(),
+      )
+      .await?;
+      return Ok(());
+    }
+  };
 
   let mut child = Some(child);
   let mut success = false;
   let mut cancelled = false;
+  let mut last_error_line: Option<String> = None;
   while let Some(event) = rx.recv().await {
     if is_job_cancelled(&state, job_id).await? {
       if let Some(process) = child.take() {
@@ -168,6 +206,9 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
     match event {
       CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
         let line = String::from_utf8_lossy(&bytes).to_string();
+        if let Some(error_line) = extract_error_line(&line) {
+          last_error_line = Some(error_line);
+        }
         if let Some(progress) = parse_progress_line(&line) {
           let snapshot = {
             let mut jobs = state.jobs.lock().await;
@@ -215,11 +256,12 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
     };
     let _ = app.emit(EVENT_DOWNLOAD_COMPLETE, &completed);
   } else {
+    let error_message = last_error_line.unwrap_or_else(|| "yt-dlp failed".to_string());
     let failed = {
       let mut jobs = state.jobs.lock().await;
       let job = jobs.get_mut(&job_id).ok_or_else(|| "job not found".to_string())?;
       job.status = DownloadStatus::Error;
-      job.error = Some("yt-dlp failed".to_string());
+      job.error = Some(error_message);
       job.completed_at = Some(Utc::now().to_rfc3339());
       job.clone()
     };
@@ -227,6 +269,43 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
   }
 
   Ok(())
+}
+
+async fn mark_job_failed(
+  app: &AppHandle,
+  state: &AppState,
+  job_id: uuid::Uuid,
+  message: String,
+) -> Result<(), String> {
+  let failed = {
+    let mut jobs = state.jobs.lock().await;
+    let job = jobs.get_mut(&job_id).ok_or_else(|| "job not found".to_string())?;
+    job.status = DownloadStatus::Error;
+    job.error = Some(message);
+    job.completed_at = Some(Utc::now().to_rfc3339());
+    job.clone()
+  };
+  let _ = app.emit(EVENT_DOWNLOAD_ERROR, &failed);
+  Ok(())
+}
+
+fn extract_error_line(line: &str) -> Option<String> {
+  let message = line.trim();
+  if message.is_empty() {
+    return None;
+  }
+
+  let lower = message.to_ascii_lowercase();
+  if lower.contains("error:")
+    || lower.contains("permission denied")
+    || lower.contains("access is denied")
+    || lower.contains("operation not permitted")
+    || lower.contains("unable to open for writing")
+  {
+    return Some(message.to_string());
+  }
+
+  None
 }
 
 fn build_download_args(
@@ -350,22 +429,115 @@ fn subtitle_source_order(source: &SubtitleSource) -> u8 {
   }
 }
 
+fn resolve_output_dir(raw: Option<&str>) -> Result<PathBuf, String> {
+  resolve_output_dir_from(raw, default_download_dir(), current_home_dir())
+}
+
+fn resolve_output_dir_from(
+  raw: Option<&str>,
+  default_dir: Option<String>,
+  home_dir: Option<String>,
+) -> Result<PathBuf, String> {
+  let value = match raw {
+    Some(candidate) => {
+      let trimmed = candidate.trim();
+      if trimmed.is_empty() {
+        return Err("Output directory cannot be empty.".to_string());
+      }
+      trimmed.to_string()
+    }
+    None => default_dir.ok_or_else(|| "Failed to determine output directory.".to_string())?,
+  };
+
+  let expanded = expand_tilde_path(&value, home_dir)?;
+  let path = PathBuf::from(expanded);
+
+  if !path.is_absolute() {
+    return Err("Output directory must be an absolute path.".to_string());
+  }
+
+  Ok(path)
+}
+
+fn expand_tilde_path(value: &str, home_dir: Option<String>) -> Result<String, String> {
+  if value == "~" {
+    return home_dir.ok_or_else(|| "Home directory could not be resolved.".to_string());
+  }
+
+  if let Some(suffix) = value.strip_prefix("~/").or_else(|| value.strip_prefix("~\\")) {
+    let home = home_dir.ok_or_else(|| "Home directory could not be resolved.".to_string())?;
+    return Ok(PathBuf::from(home).join(suffix).to_string_lossy().to_string());
+  }
+
+  if value.starts_with('~') {
+    return Err("Unsupported output directory. Use '~/' or an absolute path.".to_string());
+  }
+
+  Ok(value.to_string())
+}
+
+fn ensure_output_directory_writable(path: &Path) -> Result<(), String> {
+  std::fs::create_dir_all(path).map_err(|error| {
+    format!(
+      "Cannot create output directory '{}': {}",
+      path.display(),
+      error
+    )
+  })?;
+
+  let probe_path = path.join(format!(".grabbit-write-test-{}", uuid::Uuid::new_v4()));
+  std::fs::write(&probe_path, b"grabbit").map_err(|error| {
+    format!(
+      "Output directory '{}' is not writable: {}",
+      path.display(),
+      error
+    )
+  })?;
+  std::fs::remove_file(probe_path).map_err(|error| {
+    format!(
+      "Output directory '{}' is not writable: {}",
+      path.display(),
+      error
+    )
+  })?;
+
+  Ok(())
+}
+
 fn default_download_dir() -> Option<String> {
   if cfg!(target_os = "windows") {
+    return current_home_dir().map(|home| {
+      PathBuf::from(home)
+        .join("Downloads")
+        .to_string_lossy()
+        .to_string()
+    });
+  }
+
+  current_home_dir().map(|home| {
+    PathBuf::from(home)
+      .join("Downloads")
+      .to_string_lossy()
+      .to_string()
+  })
+}
+
+fn current_home_dir() -> Option<String> {
+  if cfg!(target_os = "windows") {
     if let Ok(user_profile) = std::env::var("USERPROFILE") {
-      return Some(format!("{user_profile}\\Downloads"));
+      return Some(user_profile);
     }
 
     let home_drive = std::env::var("HOMEDRIVE").ok();
     let home_path = std::env::var("HOMEPATH").ok();
     if let (Some(drive), Some(path)) = (home_drive, home_path) {
-      return Some(format!("{drive}{path}\\Downloads"));
+      return Some(format!("{drive}{path}"));
     }
 
     return None;
   }
 
-  std::env::var("HOME").ok().map(|home| format!("{home}/Downloads"))
+  std::env::var("HOME").ok()
 }
 
 fn yt_dlp_binary_name() -> &'static str {
@@ -384,7 +556,10 @@ async fn is_job_cancelled(state: &AppState, job_id: uuid::Uuid) -> Result<bool, 
 
 #[cfg(test)]
 mod tests {
-  use super::{build_download_args, map_video_info, parse_subtitle_tracks};
+  use super::{
+    build_download_args, expand_tilde_path, map_video_info, parse_subtitle_tracks,
+    resolve_output_dir_from,
+  };
   use crate::models::{DownloadFormat, SubtitleSource};
   use serde_json::json;
 
@@ -470,5 +645,55 @@ mod tests {
     assert!(args.contains(&"--no-write-subs".to_string()));
     assert!(!args.contains(&"--write-subs".to_string()));
     assert!(args.contains(&"vtt".to_string()));
+  }
+
+  #[test]
+  fn expand_tilde_path_expands_user_home() {
+    let value = expand_tilde_path("~/Downloads", Some("/Users/demo".to_string())).unwrap();
+    assert_eq!(value, "/Users/demo/Downloads");
+  }
+
+  #[test]
+  fn resolve_output_dir_from_uses_default_when_missing() {
+    let path = resolve_output_dir_from(
+      None,
+      Some("/Users/demo/Downloads".to_string()),
+      Some("/Users/demo".to_string()),
+    )
+    .unwrap();
+    assert_eq!(path.to_string_lossy(), "/Users/demo/Downloads");
+  }
+
+  #[test]
+  fn resolve_output_dir_from_rejects_empty_input() {
+    let result = resolve_output_dir_from(
+      Some("   "),
+      Some("/Users/demo/Downloads".to_string()),
+      Some("/Users/demo".to_string()),
+    );
+
+    assert!(result.is_err());
+  }
+
+  #[test]
+  fn resolve_output_dir_from_rejects_unsupported_tilde_user_syntax() {
+    let result = resolve_output_dir_from(
+      Some("~another/Downloads"),
+      Some("/Users/demo/Downloads".to_string()),
+      Some("/Users/demo".to_string()),
+    );
+
+    assert!(result.is_err());
+  }
+
+  #[test]
+  fn resolve_output_dir_from_rejects_relative_path() {
+    let result = resolve_output_dir_from(
+      Some("downloads"),
+      Some("/Users/demo/Downloads".to_string()),
+      Some("/Users/demo".to_string()),
+    );
+
+    assert!(result.is_err());
   }
 }
