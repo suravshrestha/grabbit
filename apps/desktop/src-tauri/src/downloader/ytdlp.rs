@@ -2,7 +2,7 @@ use crate::{
   binaries::resolve_binary_path,
   constants::{EVENT_DOWNLOAD_COMPLETE, EVENT_DOWNLOAD_ERROR, EVENT_DOWNLOAD_PROGRESS},
   downloader::progress::parse_progress_line,
-  models::{DownloadFormat, DownloadStatus},
+  models::{DownloadFormat, DownloadStatus, SubtitleSource, SubtitleTrack, VideoInfo},
   state::AppState,
 };
 use chrono::Utc;
@@ -93,7 +93,7 @@ pub async fn enqueue_download(app: AppHandle, state: AppState) -> Result<(), Str
   Ok(())
 }
 
-pub async fn get_video_info(app: &AppHandle, video_id: &str) -> Result<Value, String> {
+pub async fn get_video_info(app: &AppHandle, video_id: &str) -> Result<VideoInfo, String> {
   let ytdlp = resolve_binary_path(app, yt_dlp_binary_name()).map_err(DownloaderError::Resource)?;
   let target = format!("https://www.youtube.com/watch?v={video_id}");
   let output = app
@@ -108,12 +108,9 @@ pub async fn get_video_info(app: &AppHandle, video_id: &str) -> Result<Value, St
     return Err(DownloaderError::Process(String::from_utf8_lossy(&output.stderr).to_string()).into());
   }
 
-  let mut payload: Value = serde_json::from_slice(&output.stdout)
+  let payload: Value = serde_json::from_slice(&output.stdout)
     .map_err(|error| DownloaderError::Serialization(error.to_string()))?;
-  if let Some(object) = payload.as_object_mut() {
-    object.insert("videoId".to_string(), Value::String(video_id.to_string()));
-  }
-  Ok(payload)
+  Ok(map_video_info(video_id, &payload))
 }
 
 async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -> Result<(), String> {
@@ -137,6 +134,7 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
     &request.format,
     request.quality.as_deref(),
     request.subtitle_lang.as_deref(),
+    request.subtitle_source.as_ref(),
   );
   args.extend([
     "--cookies-from-browser".to_string(),
@@ -236,6 +234,7 @@ fn build_download_args(
   format: &DownloadFormat,
   quality: Option<&str>,
   subtitle_lang: Option<&str>,
+  subtitle_source: Option<&SubtitleSource>,
 ) -> Vec<String> {
   let mut args = vec![url.to_string()];
   match format {
@@ -266,18 +265,89 @@ fn build_download_args(
     DownloadFormat::Srt | DownloadFormat::Vtt => {
       let lang = subtitle_lang.unwrap_or("en");
       let sub_ext = if matches!(format, DownloadFormat::Srt) { "srt" } else { "vtt" };
+      match subtitle_source.unwrap_or(&SubtitleSource::Manual) {
+        SubtitleSource::Manual => args.extend(["--write-subs".to_string(), "--no-write-auto-subs".to_string()]),
+        SubtitleSource::Auto => args.extend(["--write-auto-subs".to_string(), "--no-write-subs".to_string()]),
+      }
       args.extend([
-        "--write-subs".to_string(),
-        "--write-auto-subs".to_string(),
         "--sub-langs".to_string(),
         lang.to_string(),
         "--skip-download".to_string(),
         "--convert-subs".to_string(),
         sub_ext.to_string(),
-      ]);
+      ])
     }
   }
   args
+}
+
+fn map_video_info(video_id: &str, payload: &Value) -> VideoInfo {
+  VideoInfo {
+    video_id: video_id.to_string(),
+    title: payload
+      .get("title")
+      .and_then(Value::as_str)
+      .unwrap_or("Unknown title")
+      .to_string(),
+    duration_seconds: payload.get("duration").and_then(Value::as_f64),
+    thumbnail_url: payload
+      .get("thumbnail")
+      .and_then(Value::as_str)
+      .map(ToString::to_string),
+    subtitle_tracks: parse_subtitle_tracks(payload),
+  }
+}
+
+fn parse_subtitle_tracks(payload: &Value) -> Vec<SubtitleTrack> {
+  let mut tracks = Vec::new();
+  collect_subtitle_tracks(payload, "subtitles", SubtitleSource::Manual, &mut tracks);
+  collect_subtitle_tracks(payload, "automatic_captions", SubtitleSource::Auto, &mut tracks);
+  tracks.sort_by(|left, right| {
+    subtitle_source_order(&left.source)
+      .cmp(&subtitle_source_order(&right.source))
+      .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+      .then_with(|| left.lang.cmp(&right.lang))
+  });
+  tracks
+}
+
+fn collect_subtitle_tracks(payload: &Value, key: &str, source: SubtitleSource, tracks: &mut Vec<SubtitleTrack>) {
+  let Some(language_map) = payload.get(key).and_then(Value::as_object) else {
+    return;
+  };
+
+  for (lang, variants) in language_map {
+    let base_name = variants
+      .as_array()
+      .and_then(|items| items.first())
+      .and_then(Value::as_object)
+      .and_then(|item| {
+        item
+          .get("name")
+          .and_then(Value::as_str)
+          .or_else(|| item.get("language").and_then(Value::as_str))
+      })
+      .unwrap_or(lang);
+
+    let name = if matches!(source, SubtitleSource::Auto) {
+      format!("{base_name} [Auto]")
+    } else {
+      base_name.to_string()
+    };
+
+    tracks.push(SubtitleTrack {
+      lang: lang.to_string(),
+      name,
+      source: source.clone(),
+    });
+  }
+}
+
+fn subtitle_source_order(source: &SubtitleSource) -> u8 {
+  match source {
+    SubtitleSource::Manual => 0,
+    SubtitleSource::Auto => 1,
+  }
 }
 
 fn default_download_dir() -> Option<String> {
@@ -310,4 +380,95 @@ async fn is_job_cancelled(state: &AppState, job_id: uuid::Uuid) -> Result<bool, 
   let jobs = state.jobs.lock().await;
   let job = jobs.get(&job_id).ok_or_else(|| "job not found".to_string())?;
   Ok(matches!(job.status, DownloadStatus::Cancelled))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{build_download_args, map_video_info, parse_subtitle_tracks};
+  use crate::models::{DownloadFormat, SubtitleSource};
+  use serde_json::json;
+
+  #[test]
+  fn parse_subtitle_tracks_collects_manual_and_auto_sorted() {
+    let payload = json!({
+      "subtitles": {
+        "en": [{ "name": "English" }],
+        "es": [{ "language": "Spanish" }]
+      },
+      "automatic_captions": {
+        "en": [{ "name": "English" }],
+        "de": [{}]
+      }
+    });
+
+    let tracks = parse_subtitle_tracks(&payload);
+    assert_eq!(tracks.len(), 4);
+
+    assert_eq!(tracks[0].lang, "en");
+    assert_eq!(tracks[0].name, "English");
+    assert!(matches!(tracks[0].source, SubtitleSource::Manual));
+
+    assert_eq!(tracks[1].lang, "es");
+    assert_eq!(tracks[1].name, "Spanish");
+    assert!(matches!(tracks[1].source, SubtitleSource::Manual));
+
+    assert_eq!(tracks[2].lang, "de");
+    assert_eq!(tracks[2].name, "de [Auto]");
+    assert!(matches!(tracks[2].source, SubtitleSource::Auto));
+
+    assert_eq!(tracks[3].lang, "en");
+    assert_eq!(tracks[3].name, "English [Auto]");
+    assert!(matches!(tracks[3].source, SubtitleSource::Auto));
+  }
+
+  #[test]
+  fn map_video_info_extracts_core_fields() {
+    let payload = json!({
+      "title": "Demo Title",
+      "duration": 12.5,
+      "thumbnail": "https://example.com/thumb.jpg",
+      "subtitles": {
+        "en": [{ "name": "English" }]
+      }
+    });
+
+    let info = map_video_info("abc123", &payload);
+    assert_eq!(info.video_id, "abc123");
+    assert_eq!(info.title, "Demo Title");
+    assert_eq!(info.duration_seconds, Some(12.5));
+    assert_eq!(info.thumbnail_url.as_deref(), Some("https://example.com/thumb.jpg"));
+    assert_eq!(info.subtitle_tracks.len(), 1);
+  }
+
+  #[test]
+  fn build_download_args_uses_manual_subtitle_flags() {
+    let args = build_download_args(
+      "https://example.com/video",
+      &DownloadFormat::Srt,
+      None,
+      Some("en"),
+      Some(&SubtitleSource::Manual),
+    );
+
+    assert!(args.contains(&"--write-subs".to_string()));
+    assert!(args.contains(&"--no-write-auto-subs".to_string()));
+    assert!(!args.contains(&"--write-auto-subs".to_string()));
+    assert!(args.contains(&"en".to_string()));
+  }
+
+  #[test]
+  fn build_download_args_uses_auto_subtitle_flags() {
+    let args = build_download_args(
+      "https://example.com/video",
+      &DownloadFormat::Vtt,
+      None,
+      Some("en"),
+      Some(&SubtitleSource::Auto),
+    );
+
+    assert!(args.contains(&"--write-auto-subs".to_string()));
+    assert!(args.contains(&"--no-write-subs".to_string()));
+    assert!(!args.contains(&"--write-subs".to_string()));
+    assert!(args.contains(&"vtt".to_string()));
+  }
 }

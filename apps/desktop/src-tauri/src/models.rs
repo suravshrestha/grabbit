@@ -22,6 +22,13 @@ pub enum DownloadFormat {
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum SubtitleSource {
+  Manual,
+  Auto,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadRequest {
   pub video_id: String,
@@ -29,6 +36,7 @@ pub struct DownloadRequest {
   pub format: DownloadFormat,
   pub quality: Option<String>,
   pub subtitle_lang: Option<String>,
+  pub subtitle_source: Option<SubtitleSource>,
   pub output_dir: Option<String>,
 }
 
@@ -52,4 +60,22 @@ pub struct DesktopAppInfo {
   pub version: String,
   pub ytdlp_version: String,
   pub status: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleTrack {
+  pub lang: String,
+  pub name: String,
+  pub source: SubtitleSource,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoInfo {
+  pub video_id: String,
+  pub title: String,
+  pub duration_seconds: Option<f64>,
+  pub thumbnail_url: Option<String>,
+  pub subtitle_tracks: Vec<SubtitleTrack>,
 }

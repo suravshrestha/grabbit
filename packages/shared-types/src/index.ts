@@ -14,6 +14,7 @@ export interface DownloadRequest {
   format: DownloadFormat
   quality?: '360p' | '720p' | '1080p' | '4k' | 'best'
   subtitleLang?: string
+  subtitleSource?: 'manual' | 'auto'
   outputDir?: string
 }
 
@@ -41,4 +42,11 @@ export interface VideoInfo {
   title: string
   durationSeconds?: number
   thumbnailUrl?: string
+  subtitleTracks: SubtitleTrack[]
+}
+
+export interface SubtitleTrack {
+  lang: string
+  name: string
+  source: 'manual' | 'auto'
 }
