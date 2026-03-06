@@ -13,6 +13,13 @@ use tauri_plugin_shell::{process::CommandEvent, ShellExt};
 use thiserror::Error;
 use tracing::error;
 
+struct AttemptResult {
+  success: bool,
+  cancelled: bool,
+  last_error_line: Option<String>,
+  auth_error_detected: bool,
+}
+
 #[derive(Error, Debug)]
 pub enum DownloaderError {
   #[error("resource lookup failed: {0}")]
@@ -154,28 +161,25 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
       return Ok(());
     }
   };
-  let mut args = build_download_args(
+  let mut base_args = build_download_args(
     &request.url,
     &request.format,
     request.quality.as_deref(),
     request.subtitle_lang.as_deref(),
     request.subtitle_source.as_ref(),
   );
-  args.extend([
-    "--cookies-from-browser".to_string(),
-    "chrome".to_string(),
-    "-o".to_string(),
-    output_template,
-    "--newline".to_string(),
-  ]);
+  base_args.extend(["-o".to_string(), output_template.clone(), "--newline".to_string()]);
 
-  let (mut rx, child) = match app
-    .shell()
-    .command(ytdlp.to_string_lossy().to_string())
-    .args(args)
-    .spawn()
+  let first_attempt = match run_ytdlp_attempt(
+    &app,
+    &state,
+    job_id,
+    ytdlp.to_string_lossy().to_string(),
+    base_args.clone(),
+  )
+  .await
   {
-    Ok(tuple) => tuple,
+    Ok(result) => result,
     Err(error) => {
       mark_job_failed(
         &app,
@@ -188,12 +192,94 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
     }
   };
 
+  if first_attempt.cancelled || is_job_cancelled(&state, job_id).await? {
+    return Ok(());
+  }
+
+  let retry_with_cookies = should_retry_with_browser_cookies(&first_attempt);
+  let mut success = first_attempt.success;
+  let mut final_error_line = first_attempt.last_error_line;
+  if retry_with_cookies {
+    let mut cookie_args = base_args;
+    cookie_args.extend(["--cookies-from-browser".to_string(), "chrome".to_string()]);
+    let second_attempt = match run_ytdlp_attempt(
+      &app,
+      &state,
+      job_id,
+      ytdlp.to_string_lossy().to_string(),
+      cookie_args,
+    )
+    .await
+    {
+      Ok(result) => result,
+      Err(error) => {
+        mark_job_failed(
+          &app,
+          &state,
+          job_id,
+          DownloaderError::Process(error.to_string()).to_string(),
+        )
+        .await?;
+        return Ok(());
+      }
+    };
+
+    if second_attempt.cancelled || is_job_cancelled(&state, job_id).await? {
+      return Ok(());
+    }
+
+    success = second_attempt.success;
+    final_error_line = second_attempt.last_error_line.or(final_error_line);
+  }
+
+  if success {
+    let completed = {
+      let mut jobs = state.jobs.lock().await;
+      let job = jobs.get_mut(&job_id).ok_or_else(|| "job not found".to_string())?;
+      job.status = DownloadStatus::Complete;
+      job.progress = 100.0;
+      job.completed_at = Some(Utc::now().to_rfc3339());
+      job.clone()
+    };
+    let _ = app.emit(EVENT_DOWNLOAD_COMPLETE, &completed);
+  } else {
+    let error_message = final_error_line.unwrap_or_else(|| "yt-dlp failed".to_string());
+    let failed = {
+      let mut jobs = state.jobs.lock().await;
+      let job = jobs.get_mut(&job_id).ok_or_else(|| "job not found".to_string())?;
+      job.status = DownloadStatus::Error;
+      job.error = Some(error_message);
+      job.completed_at = Some(Utc::now().to_rfc3339());
+      job.clone()
+    };
+    let _ = app.emit(EVENT_DOWNLOAD_ERROR, &failed);
+  }
+
+  Ok(())
+}
+
+async fn run_ytdlp_attempt(
+  app: &AppHandle,
+  state: &AppState,
+  job_id: uuid::Uuid,
+  ytdlp_command: String,
+  args: Vec<String>,
+) -> Result<AttemptResult, String> {
+  let (mut rx, child) = app
+    .shell()
+    .command(ytdlp_command)
+    .args(args)
+    .spawn()
+    .map_err(|error| error.to_string())?;
+
   let mut child = Some(child);
   let mut success = false;
   let mut cancelled = false;
   let mut last_error_line: Option<String> = None;
+  let mut auth_error_detected = false;
+
   while let Some(event) = rx.recv().await {
-    if is_job_cancelled(&state, job_id).await? {
+    if is_job_cancelled(state, job_id).await? {
       if let Some(process) = child.take() {
         if let Err(err) = process.kill() {
           error!("failed to kill process after cancellation: {err}");
@@ -206,6 +292,9 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
     match event {
       CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
         let line = String::from_utf8_lossy(&bytes).to_string();
+        if is_auth_error_line(&line) {
+          auth_error_detected = true;
+        }
         if let Some(error_line) = extract_error_line(&line) {
           last_error_line = Some(error_line);
         }
@@ -241,34 +330,16 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
     }
   }
 
-  if cancelled || is_job_cancelled(&state, job_id).await? {
-    return Ok(());
-  }
+  Ok(AttemptResult {
+    success,
+    cancelled,
+    last_error_line,
+    auth_error_detected,
+  })
+}
 
-  if success {
-    let completed = {
-      let mut jobs = state.jobs.lock().await;
-      let job = jobs.get_mut(&job_id).ok_or_else(|| "job not found".to_string())?;
-      job.status = DownloadStatus::Complete;
-      job.progress = 100.0;
-      job.completed_at = Some(Utc::now().to_rfc3339());
-      job.clone()
-    };
-    let _ = app.emit(EVENT_DOWNLOAD_COMPLETE, &completed);
-  } else {
-    let error_message = last_error_line.unwrap_or_else(|| "yt-dlp failed".to_string());
-    let failed = {
-      let mut jobs = state.jobs.lock().await;
-      let job = jobs.get_mut(&job_id).ok_or_else(|| "job not found".to_string())?;
-      job.status = DownloadStatus::Error;
-      job.error = Some(error_message);
-      job.completed_at = Some(Utc::now().to_rfc3339());
-      job.clone()
-    };
-    let _ = app.emit(EVENT_DOWNLOAD_ERROR, &failed);
-  }
-
-  Ok(())
+fn should_retry_with_browser_cookies(attempt: &AttemptResult) -> bool {
+  !attempt.success && !attempt.cancelled && attempt.auth_error_detected
 }
 
 async fn mark_job_failed(
@@ -306,6 +377,22 @@ fn extract_error_line(line: &str) -> Option<String> {
   }
 
   None
+}
+
+fn is_auth_error_line(line: &str) -> bool {
+  let message = line.to_ascii_lowercase();
+  let patterns = [
+    "login required",
+    "sign in to confirm your age",
+    "use --cookies-from-browser",
+    "cookies are required",
+    "this video is private",
+    "members-only content",
+    "confirm you're not a bot",
+    "captcha",
+    "authentication required",
+  ];
+  patterns.iter().any(|pattern| message.contains(pattern))
 }
 
 fn build_download_args(
@@ -557,8 +644,9 @@ async fn is_job_cancelled(state: &AppState, job_id: uuid::Uuid) -> Result<bool, 
 #[cfg(test)]
 mod tests {
   use super::{
-    build_download_args, expand_tilde_path, map_video_info, parse_subtitle_tracks,
-    resolve_output_dir_from,
+    build_download_args, expand_tilde_path, is_auth_error_line, map_video_info,
+    parse_subtitle_tracks, resolve_output_dir_from, should_retry_with_browser_cookies,
+    AttemptResult,
   };
   use crate::models::{DownloadFormat, SubtitleSource};
   use serde_json::json;
@@ -695,5 +783,45 @@ mod tests {
     );
 
     assert!(result.is_err());
+  }
+
+  #[test]
+  fn is_auth_error_line_detects_login_required_messages() {
+    assert!(is_auth_error_line("ERROR: Sign in to confirm your age"));
+    assert!(is_auth_error_line("ERROR: Use --cookies-from-browser or --cookies for the authentication"));
+    assert!(is_auth_error_line("Please confirm you're not a bot"));
+  }
+
+  #[test]
+  fn is_auth_error_line_ignores_non_auth_errors() {
+    assert!(!is_auth_error_line("ERROR: Unable to write to file"));
+    assert!(!is_auth_error_line("ERROR: HTTP Error 500: Internal Server Error"));
+  }
+
+  #[test]
+  fn should_retry_with_browser_cookies_only_on_auth_failures() {
+    let attempt = AttemptResult {
+      success: false,
+      cancelled: false,
+      last_error_line: Some("error".to_string()),
+      auth_error_detected: true,
+    };
+    assert!(should_retry_with_browser_cookies(&attempt));
+
+    let non_auth = AttemptResult {
+      success: false,
+      cancelled: false,
+      last_error_line: Some("error".to_string()),
+      auth_error_detected: false,
+    };
+    assert!(!should_retry_with_browser_cookies(&non_auth));
+
+    let succeeded = AttemptResult {
+      success: true,
+      cancelled: false,
+      last_error_line: None,
+      auth_error_detected: true,
+    };
+    assert!(!should_retry_with_browser_cookies(&succeeded));
   }
 }
