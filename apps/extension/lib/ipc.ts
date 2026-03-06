@@ -42,11 +42,19 @@ function isVideoInfo(value: unknown): value is VideoInfo {
     return false
   }
 
-  if (value.durationSeconds !== undefined && typeof value.durationSeconds !== 'number') {
+  if (
+    value.durationSeconds !== undefined &&
+    value.durationSeconds !== null &&
+    typeof value.durationSeconds !== 'number'
+  ) {
     return false
   }
 
-  if (value.thumbnailUrl !== undefined && typeof value.thumbnailUrl !== 'string') {
+  if (
+    value.thumbnailUrl !== undefined &&
+    value.thumbnailUrl !== null &&
+    typeof value.thumbnailUrl !== 'string'
+  ) {
     return false
   }
 

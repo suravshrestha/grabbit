@@ -43,6 +43,7 @@ export function App(): JSX.Element {
         setVideoInfo(info)
         setInfoError(undefined)
       } catch (fetchError) {
+        setVideoInfo(undefined)
         setInfoError(fetchError instanceof Error ? fetchError.message : 'Failed to load video info')
       }
     })()
