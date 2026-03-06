@@ -56,13 +56,6 @@ pub struct DownloadJob {
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct DesktopAppInfo {
-  pub version: String,
-  pub ytdlp_version: String,
-  pub status: String,
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SubtitleTrack {
   pub lang: String,

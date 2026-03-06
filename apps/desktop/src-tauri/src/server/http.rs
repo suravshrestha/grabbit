@@ -1,5 +1,5 @@
 use crate::{
-  constants::{APP_VERSION, SERVER_PORT},
+  constants::{APP_VERSION, SERVER_HOST, SERVER_PORT},
   downloader::ytdlp::{enqueue_download, get_video_info},
   models::{DownloadJob, DownloadRequest, DownloadStatus},
   state::AppState,
@@ -72,7 +72,9 @@ pub async fn start_http_server(app: AppHandle, state: AppState) -> Result<(), St
     .layer(cors)
     .with_state(context);
 
-  let addr = SocketAddr::from(([127, 0, 0, 1], SERVER_PORT));
+  let addr = format!("{SERVER_HOST}:{SERVER_PORT}")
+    .parse::<SocketAddr>()
+    .map_err(|error| format!("invalid bind address {SERVER_HOST}:{SERVER_PORT}: {error}"))?;
   let listener = tokio::net::TcpListener::bind(addr)
     .await
     .map_err(|error| error.to_string())?;
