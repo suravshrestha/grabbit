@@ -21,6 +21,47 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function isSubtitleSource(value: unknown): value is 'manual' | 'auto' {
+  return value === 'manual' || value === 'auto'
+}
+
+function isVideoInfo(value: unknown): value is VideoInfo {
+  if (!isObject(value)) {
+    return false
+  }
+
+  if (typeof value.videoId !== 'string' || typeof value.title !== 'string') {
+    return false
+  }
+
+  if (!Array.isArray(value.subtitleTracks)) {
+    return false
+  }
+
+  if (value.durationSeconds !== undefined && typeof value.durationSeconds !== 'number') {
+    return false
+  }
+
+  if (value.thumbnailUrl !== undefined && typeof value.thumbnailUrl !== 'string') {
+    return false
+  }
+
+  return value.subtitleTracks.every((track) => {
+    if (!isObject(track)) {
+      return false
+    }
+    return (
+      typeof track.lang === 'string' &&
+      typeof track.name === 'string' &&
+      isSubtitleSource(track.source)
+    )
+  })
+}
+
 export async function checkDesktopHealth(): Promise<boolean> {
   try {
     const response = await fetch(`${IPC_BASE_URL}/api/health`)
@@ -31,7 +72,11 @@ export async function checkDesktopHealth(): Promise<boolean> {
 }
 
 export async function fetchVideoInfo(videoId: string): Promise<VideoInfo> {
-  return request<VideoInfo>(`/api/info?videoId=${encodeURIComponent(videoId)}`)
+  const payload = await request<unknown>(`/api/info?videoId=${encodeURIComponent(videoId)}`)
+  if (!isVideoInfo(payload)) {
+    throw new Error('Desktop app is outdated. Restart or update Grabbit desktop app.')
+  }
+  return payload
 }
 
 export async function createDownloadJob(payload: DownloadRequest): Promise<JobResponse> {
