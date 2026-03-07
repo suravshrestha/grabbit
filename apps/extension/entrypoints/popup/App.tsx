@@ -49,7 +49,7 @@ const ACTIVE_STATUSES = new Set<DownloadStatus>(['queued', 'downloading', 'mergi
 export function App(): JSX.Element {
   const currentTab = useCurrentTab()
   const desktopRunning = useDesktopApp()
-  const { jobs, focusedJob, loading, error, startDownload } = useDownload()
+  const { jobs, focusedJob, setFocusedJob, loading, error, startDownload } = useDownload()
 
   const [format, setFormat] = useState<DownloadFormat>('mp4')
   const [quality, setQuality] = useState<'720p' | '1080p' | '4k' | 'best'>('1080p')
@@ -152,6 +152,11 @@ export function App(): JSX.Element {
       format,
     }
 
+    const title = videoInfo?.title ?? currentTab.title
+    if (title) {
+      payload.title = title
+    }
+
     if (format === 'mp4') {
       payload.quality = quality
     }
@@ -207,6 +212,9 @@ export function App(): JSX.Element {
   const isDownloading = job !== undefined && ACTIVE_STATUSES.has(job.status)
   const controlsLocked = loading
   const canDownload = desktopRunning && !!videoId && (!subtitleMode || !!selectedSubtitleTrack)
+  const hasDuplicateActiveForCurrentVideo =
+    videoId !== null &&
+    jobs.some((entry) => entry.request.videoId === videoId && ACTIVE_STATUSES.has(entry.status))
   const downloadActionLabel = hasActiveJobs ? 'Add to Queue' : 'Start Download'
   const queueItems = [...jobs].reverse()
 
@@ -279,7 +287,7 @@ export function App(): JSX.Element {
             )}
             <Separator className="my-1" />
             <DownloadButton
-              disabled={!canDownload || controlsLocked}
+              disabled={!canDownload || controlsLocked || hasDuplicateActiveForCurrentVideo}
               loading={loading}
               idleLabel={downloadActionLabel}
               loadingLabel="Adding to Queue..."
@@ -303,10 +311,17 @@ export function App(): JSX.Element {
             </CardHeader>
             <CardContent className="grid gap-2 px-4">
               {queueItems.map((entry) => (
-                <div key={entry.id} className="bg-muted/30 grid gap-1 rounded-md border px-3 py-2">
+                <button
+                  key={entry.id}
+                  className={`bg-muted/30 grid w-full gap-1 rounded-md border px-3 py-2 text-left transition-colors ${
+                    job?.id === entry.id ? 'border-primary/50 bg-primary/5' : 'hover:bg-muted/50'
+                  }`}
+                  onClick={() => setFocusedJob(entry.id)}
+                  type="button"
+                >
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-foreground truncate text-xs font-medium">
-                      {entry.request.videoId}
+                      {entry.request.title ?? entry.filename ?? entry.request.videoId}
                     </p>
                     <span className="text-muted-foreground text-[11px]">
                       {STATUS_LABEL[entry.status]}
@@ -315,7 +330,14 @@ export function App(): JSX.Element {
                   <p className="text-muted-foreground text-[11px] tabular-nums">
                     {entry.progress.toFixed(1)}%
                   </p>
-                </div>
+                  {ACTIVE_STATUSES.has(entry.status) && (entry.speed || entry.eta) && (
+                    <p className="text-muted-foreground text-[11px] tabular-nums">
+                      {entry.speed ? `Speed: ${entry.speed}` : 'Speed: —'}
+                      {' • '}
+                      {entry.eta ? `ETA: ${entry.eta}` : 'ETA: —'}
+                    </p>
+                  )}
+                </button>
               ))}
             </CardContent>
           </Card>

@@ -6,6 +6,7 @@ import { POLL_INTERVAL_MS } from '@/lib/constants'
 interface UseDownloadState {
   jobs: DownloadJob[]
   focusedJob: DownloadJob | undefined
+  setFocusedJob: (jobId: string) => void
   loading: boolean
   error: string | undefined
   startDownload: (request: DownloadRequest) => Promise<void>
@@ -24,6 +25,7 @@ export function useDownload(): UseDownloadState {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>()
   const timerRef = useRef<number | undefined>(undefined)
+  const focusedJobIdRef = useRef<string>()
 
   const stopPolling = useCallback((): void => {
     if (timerRef.current !== undefined) {
@@ -35,7 +37,16 @@ export function useDownload(): UseDownloadState {
   const refreshQueue = useCallback(async (): Promise<void> => {
     const queue = await getDownloadQueue()
     setJobs(queue)
-    setFocusedJob(pickFocusedJob(queue))
+    const selected =
+      (focusedJobIdRef.current
+        ? queue.find((entry) => entry.id === focusedJobIdRef.current)
+        : undefined) ?? pickFocusedJob(queue)
+    setFocusedJob(selected)
+    if (selected) {
+      focusedJobIdRef.current = selected.id
+    } else {
+      focusedJobIdRef.current = undefined
+    }
   }, [])
 
   const startPolling = useCallback((): void => {
@@ -52,7 +63,8 @@ export function useDownload(): UseDownloadState {
     setError(undefined)
 
     try {
-      await createDownloadJob(request)
+      const { jobId } = await createDownloadJob(request)
+      focusedJobIdRef.current = jobId
       await refreshQueue()
     } catch (downloadError) {
       setError(downloadError instanceof Error ? downloadError.message : 'Unknown download error')
@@ -77,9 +89,21 @@ export function useDownload(): UseDownloadState {
     return () => stopPolling()
   }, [hydrateFromQueue, stopPolling])
 
+  const focusJob = useCallback(
+    (jobId: string): void => {
+      focusedJobIdRef.current = jobId
+      const selected = jobs.find((entry) => entry.id === jobId)
+      if (selected) {
+        setFocusedJob(selected)
+      }
+    },
+    [jobs],
+  )
+
   return {
     jobs,
     focusedJob,
+    setFocusedJob: focusJob,
     loading,
     error,
     startDownload,
