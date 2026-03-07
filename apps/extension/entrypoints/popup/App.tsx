@@ -227,13 +227,8 @@ export function App(): JSX.Element {
           </CardHeader>
           <CardContent className="grid gap-3 px-4">
             {infoLoading ? (
-              <div className="grid gap-2">
-                <div className="aspect-video w-full overflow-hidden rounded-lg">
-                  <Skeleton className="h-full w-full rounded-lg" />
-                </div>
-                <p className="text-muted-foreground animate-pulse text-xs">
-                  Loading video details…
-                </p>
+              <div className="aspect-video w-full overflow-hidden rounded-lg">
+                <Skeleton className="h-full w-full rounded-lg" />
               </div>
             ) : videoInfo?.thumbnailUrl ? (
               <div className="aspect-video w-full overflow-hidden rounded-lg">
@@ -304,6 +299,13 @@ export function App(): JSX.Element {
               </CardHeader>
               <CardContent className="grid gap-3 px-4">
                 <ProgressBar progress={job.progress} />
+                {isDownloading && (job.speed || job.eta) && (
+                  <p className="text-muted-foreground text-xs tabular-nums">
+                    {job.speed ? `Speed: ${job.speed}` : 'Speed: —'}
+                    {' • '}
+                    {job.eta ? `ETA: ${job.eta}` : 'ETA: —'}
+                  </p>
+                )}
                 <StatusMessage
                   message={`Status: ${STATUS_LABEL[job.status]}`}
                   tone={STATUS_TONE[job.status]}
