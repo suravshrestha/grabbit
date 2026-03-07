@@ -1,3 +1,6 @@
+import { LoaderCircle, Rocket } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+
 interface DownloadButtonProps {
   disabled?: boolean
   loading?: boolean
@@ -6,8 +9,23 @@ interface DownloadButtonProps {
 
 export function DownloadButton({ disabled, loading, onClick }: DownloadButtonProps): JSX.Element {
   return (
-    <button disabled={disabled || loading} onClick={onClick}>
-      {loading ? 'Downloading...' : 'Download'}
-    </button>
+    <Button
+      className="w-full rounded-lg font-semibold"
+      disabled={disabled || loading}
+      onClick={onClick}
+      size="lg"
+    >
+      {loading ? (
+        <>
+          <LoaderCircle className="size-4 animate-spin" />
+          Downloading...
+        </>
+      ) : (
+        <>
+          <Rocket className="size-4" />
+          Start Download
+        </>
+      )}
+    </Button>
   )
 }
