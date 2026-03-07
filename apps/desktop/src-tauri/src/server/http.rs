@@ -1,5 +1,5 @@
 use crate::{
-  constants::{APP_VERSION, SERVER_HOST, SERVER_PORT},
+  constants::{APP_VERSION, EVENT_QUEUE_UPDATED, SERVER_HOST, SERVER_PORT},
   downloader::ytdlp::{enqueue_download, get_video_info},
   models::{DownloadJob, DownloadRequest, DownloadStatus},
   state::AppState,
@@ -14,7 +14,7 @@ use axum::{
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::SocketAddr};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
@@ -134,6 +134,7 @@ async fn download(
     order.push_back(job.id);
   }
 
+  let _ = context.app.emit(EVENT_QUEUE_UPDATED, &job);
   enqueue_download(context.app.clone(), context.state.clone())
     .await
     .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
@@ -168,12 +169,18 @@ async fn cancel(
   validate_localhost(addr)?;
   let id = uuid::Uuid::parse_str(&job_id).map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
 
-  {
+  let cancelled = {
     let mut jobs = context.state.jobs.lock().await;
     if let Some(job) = jobs.get_mut(&id) {
       job.status = crate::models::DownloadStatus::Cancelled;
       job.completed_at = Some(chrono::Utc::now().to_rfc3339());
+      Some(job.clone())
+    } else {
+      None
     }
+  };
+  if let Some(job) = cancelled {
+    let _ = context.app.emit(EVENT_QUEUE_UPDATED, &job);
   }
 
   let body = HashMap::from([("status", "cancelled")]);

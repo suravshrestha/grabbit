@@ -1,10 +1,11 @@
 use crate::{
+  constants::EVENT_QUEUE_UPDATED,
   downloader::ytdlp::enqueue_download,
   models::{DownloadJob, DownloadRequest, DownloadStatus},
   state::AppState,
 };
 use chrono::Utc;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 #[tauri::command]
@@ -36,6 +37,7 @@ pub async fn download_video(
     order.push_back(job.id);
   }
 
+  let _ = app.emit(EVENT_QUEUE_UPDATED, &job);
   enqueue_download(app, state.inner().clone()).await?;
   Ok(job)
 }

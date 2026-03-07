@@ -1,6 +1,6 @@
 use crate::{
   binaries::resolve_binary_path,
-  constants::{EVENT_DOWNLOAD_COMPLETE, EVENT_DOWNLOAD_ERROR, EVENT_DOWNLOAD_PROGRESS},
+  constants::{EVENT_DOWNLOAD_COMPLETE, EVENT_DOWNLOAD_ERROR, EVENT_DOWNLOAD_PROGRESS, EVENT_QUEUE_UPDATED},
   downloader::progress::parse_progress_line,
   models::{DownloadFormat, DownloadStatus, SubtitleSource, SubtitleTrack, VideoInfo},
   state::AppState,
@@ -122,13 +122,15 @@ pub async fn get_video_info(app: &AppHandle, video_id: &str) -> Result<VideoInfo
 }
 
 async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -> Result<(), String> {
-  let request = {
+  let starting_job = {
     let mut jobs = state.jobs.lock().await;
     let job = jobs.get_mut(&job_id).ok_or_else(|| "job not found".to_string())?;
     job.status = DownloadStatus::Downloading;
     job.error = None;
-    job.request.clone()
+    job.clone()
   };
+  let request = starting_job.request.clone();
+  let _ = app.emit(EVENT_QUEUE_UPDATED, &starting_job);
 
   let output_dir = match resolve_output_dir(request.output_dir.as_deref()) {
     Ok(path) => path,

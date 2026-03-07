@@ -4,3 +4,4 @@ pub const SERVER_PORT: u16 = 47891;
 pub const EVENT_DOWNLOAD_PROGRESS: &str = "download://progress";
 pub const EVENT_DOWNLOAD_COMPLETE: &str = "download://complete";
 pub const EVENT_DOWNLOAD_ERROR: &str = "download://error";
+pub const EVENT_QUEUE_UPDATED: &str = "download://queue-updated";
