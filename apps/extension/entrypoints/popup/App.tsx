@@ -101,7 +101,7 @@ export function App(): JSX.Element {
   useEffect(() => {
     if (job && job.id !== prevJobIdRef.current) {
       prevJobIdRef.current = job.id
-      downloadStatusRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+      downloadStatusRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       setStatusFlash(true)
     }
     if (!job) {
@@ -250,22 +250,23 @@ export function App(): JSX.Element {
         {infoError && <StatusMessage message={infoError} tone="error" />}
 
         {job && (
-          <Card
-            ref={downloadStatusRef}
-            className={`gap-3 py-4 transition-shadow${statusFlash ? 'status-flash' : ''}`}
-            onAnimationEnd={() => setStatusFlash(false)}
-          >
-            <CardHeader className="px-4">
-              <CardTitle className="text-sm">Download Status</CardTitle>
-            </CardHeader>
-            <CardContent className="grid gap-3 px-4">
-              <ProgressBar progress={job.progress} />
-              <StatusMessage
-                message={`Status: ${STATUS_LABEL[job.status]}`}
-                tone={STATUS_TONE[job.status]}
-              />
-            </CardContent>
-          </Card>
+          <div ref={downloadStatusRef}>
+            <Card
+              className={`gap-3 py-4 transition-shadow${statusFlash ? 'status-flash' : ''}`}
+              onAnimationEnd={() => setStatusFlash(false)}
+            >
+              <CardHeader className="px-4">
+                <CardTitle className="text-sm">Download Status</CardTitle>
+              </CardHeader>
+              <CardContent className="grid gap-3 px-4">
+                <ProgressBar progress={job.progress} />
+                <StatusMessage
+                  message={`Status: ${STATUS_LABEL[job.status]}`}
+                  tone={STATUS_TONE[job.status]}
+                />
+              </CardContent>
+            </Card>
+          </div>
         )}
 
         {error && <StatusMessage message={error} tone="error" />}
