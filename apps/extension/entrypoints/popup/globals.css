@@ -81,3 +81,18 @@
     padding-right: 2.25rem;
   }
 }
+
+@keyframes status-flash-pulse {
+  0% {
+    box-shadow: 0 0 0 0 oklch(0.62 0.24 28 / 0.32);
+  }
+  100% {
+    box-shadow: 0 0 0 10px oklch(0.62 0.24 28 / 0);
+  }
+}
+
+@layer utilities {
+  .status-flash {
+    animation: status-flash-pulse 850ms ease-out 1;
+  }
+}

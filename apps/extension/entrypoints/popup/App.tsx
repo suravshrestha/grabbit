@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   DownloadFormat,
   DownloadRequest,
@@ -43,6 +43,8 @@ const STATUS_LABEL: Record<DownloadStatus, string> = {
   cancelled: 'Cancelled',
 }
 
+const ACTIVE_STATUSES = new Set<DownloadStatus>(['queued', 'downloading', 'merging'])
+
 export function App(): JSX.Element {
   const currentTab = useCurrentTab()
   const desktopRunning = useDesktopApp()
@@ -54,6 +56,10 @@ export function App(): JSX.Element {
   const [videoInfo, setVideoInfo] = useState<VideoInfo>()
   const [infoError, setInfoError] = useState<string>()
   const [infoLoading, setInfoLoading] = useState(false)
+  const [statusFlash, setStatusFlash] = useState(false)
+
+  const downloadStatusRef = useRef<HTMLDivElement>(null)
+  const prevJobIdRef = useRef<string | undefined>(undefined)
 
   const videoId = useMemo(() => {
     if (!currentTab.url) {
@@ -90,6 +96,18 @@ export function App(): JSX.Element {
       cancelled = true
     }
   }, [desktopRunning, videoId])
+
+  // Scroll to and flash the Download Status card when a new job starts
+  useEffect(() => {
+    if (job && job.id !== prevJobIdRef.current) {
+      prevJobIdRef.current = job.id
+      downloadStatusRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+      setStatusFlash(true)
+    }
+    if (!job) {
+      prevJobIdRef.current = undefined
+    }
+  }, [job])
 
   const subtitleTracks = videoInfo?.subtitleTracks ?? []
   const subtitleMode = format === 'srt' || format === 'vtt'
@@ -138,6 +156,8 @@ export function App(): JSX.Element {
     await startDownload(payload)
   }
 
+  const isDownloading = job !== undefined && ACTIVE_STATUSES.has(job.status)
+  const controlsLocked = loading || isDownloading
   const canDownload = desktopRunning && !!videoId && (!subtitleMode || !!selectedSubtitleTrack)
 
   return (
@@ -164,18 +184,18 @@ export function App(): JSX.Element {
           <CardContent className="grid gap-3 px-4">
             {infoLoading ? (
               <div className="grid gap-2">
-                <div className="bg-muted/40 border-border/80 aspect-video w-full overflow-hidden rounded-lg border p-1">
-                  <Skeleton className="h-full w-full rounded-md" />
+                <div className="aspect-video w-full overflow-hidden rounded-lg">
+                  <Skeleton className="h-full w-full rounded-lg" />
                 </div>
                 <p className="text-muted-foreground animate-pulse text-xs">
                   Loading video details…
                 </p>
               </div>
             ) : videoInfo?.thumbnailUrl ? (
-              <div className="bg-muted/40 border-border/80 aspect-video w-full overflow-hidden rounded-lg border p-1">
+              <div className="aspect-video w-full overflow-hidden rounded-lg">
                 <img
                   alt={videoInfo.title}
-                  className="h-full w-full rounded-md object-contain"
+                  className="h-full w-full object-cover"
                   src={videoInfo.thumbnailUrl}
                 />
               </div>
@@ -197,10 +217,13 @@ export function App(): JSX.Element {
             <CardTitle className="text-sm">Download Options</CardTitle>
           </CardHeader>
           <CardContent className="grid gap-3 px-4">
-            <FormatPicker value={format} onChange={setFormat} />
-            {format === 'mp4' && <QualitySelector value={quality} onChange={setQuality} />}
+            <FormatPicker disabled={controlsLocked} value={format} onChange={setFormat} />
+            {format === 'mp4' && (
+              <QualitySelector disabled={controlsLocked} value={quality} onChange={setQuality} />
+            )}
             {subtitleMode && subtitleTracks.length > 0 && (
               <SubtitleTrackSelector
+                disabled={controlsLocked}
                 tracks={subtitleTracks}
                 value={subtitleTrackValue}
                 onChange={setSubtitleTrackValue}
@@ -211,7 +234,7 @@ export function App(): JSX.Element {
             )}
             <Separator className="my-1" />
             <DownloadButton
-              disabled={!canDownload}
+              disabled={!canDownload || controlsLocked}
               loading={loading}
               onClick={() => void handleDownload()}
             />
@@ -227,7 +250,11 @@ export function App(): JSX.Element {
         {infoError && <StatusMessage message={infoError} tone="error" />}
 
         {job && (
-          <Card className="gap-3 py-4">
+          <Card
+            ref={downloadStatusRef}
+            className={`gap-3 py-4 transition-shadow${statusFlash ? 'status-flash' : ''}`}
+            onAnimationEnd={() => setStatusFlash(false)}
+          >
             <CardHeader className="px-4">
               <CardTitle className="text-sm">Download Status</CardTitle>
             </CardHeader>
