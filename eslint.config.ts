@@ -7,7 +7,14 @@ import unicorn from 'eslint-plugin-unicorn'
 
 export default tseslint.config(
   {
-    ignores: ['**/dist/**', '**/target/**', '**/.wxt/**', '**/.output/**', '**/src-tauri/gen/**'],
+    ignores: [
+      '**/dist/**',
+      '**/target/**',
+      '**/.wxt/**',
+      '**/.output/**',
+      '**/src-tauri/gen/**',
+      '**/postcss.config.*',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,

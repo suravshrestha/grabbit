@@ -32,6 +32,7 @@ pub enum SubtitleSource {
 #[serde(rename_all = "camelCase")]
 pub struct DownloadRequest {
   pub video_id: String,
+  pub title: Option<String>,
   pub url: String,
   pub format: DownloadFormat,
   pub quality: Option<String>,
@@ -50,6 +51,8 @@ pub struct DownloadJob {
   pub speed: Option<String>,
   pub eta: Option<String>,
   pub filename: Option<String>,
+  pub output_path: Option<String>,
+  pub output_dir_resolved: Option<String>,
   pub error: Option<String>,
   pub created_at: String,
   pub completed_at: Option<String>,

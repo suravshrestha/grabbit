@@ -1,5 +1,5 @@
 use crate::{
-  constants::{APP_VERSION, SERVER_HOST, SERVER_PORT},
+  constants::{APP_VERSION, EVENT_QUEUE_UPDATED, SERVER_HOST, SERVER_PORT},
   downloader::ytdlp::{enqueue_download, get_video_info},
   models::{DownloadJob, DownloadRequest, DownloadStatus},
   state::AppState,
@@ -13,8 +13,13 @@ use axum::{
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, net::SocketAddr};
-use tauri::AppHandle;
+use std::{
+  collections::HashMap,
+  net::SocketAddr,
+  path::{Path as FsPath, PathBuf},
+  process::Command,
+};
+use tauri::{AppHandle, Emitter};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
@@ -34,6 +39,11 @@ struct HealthResponse {
 struct DownloadResponse {
   #[serde(rename = "jobId")]
   job_id: String,
+}
+
+#[derive(Serialize)]
+struct ActionResponse {
+  status: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -67,7 +77,10 @@ pub async fn start_http_server(app: AppHandle, state: AppState) -> Result<(), St
     .route("/api/health", get(health))
     .route("/api/info", get(info))
     .route("/api/download", post(download))
+    .route("/api/queue", get(queue))
     .route("/api/status/:job_id", get(status))
+    .route("/api/jobs/:job_id/open-file", post(open_file))
+    .route("/api/jobs/:job_id/open-folder", post(open_folder))
     .route("/api/jobs/:job_id", delete(cancel))
     .layer(cors)
     .with_state(context);
@@ -119,6 +132,8 @@ async fn download(
     speed: None,
     eta: None,
     filename: None,
+    output_path: None,
+    output_dir_resolved: None,
     error: None,
     created_at: Utc::now().to_rfc3339(),
     completed_at: None,
@@ -134,6 +149,7 @@ async fn download(
     order.push_back(job.id);
   }
 
+  let _ = context.app.emit(EVENT_QUEUE_UPDATED, &job);
   enqueue_download(context.app.clone(), context.state.clone())
     .await
     .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
@@ -160,6 +176,20 @@ async fn status(
   Ok(Json(job))
 }
 
+async fn queue(
+  State(context): State<HttpContext>,
+  ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Result<Json<Vec<DownloadJob>>, (StatusCode, String)> {
+  validate_localhost(addr)?;
+  let order = context.state.order.lock().await;
+  let jobs = context.state.jobs.lock().await;
+  let queue = order
+    .iter()
+    .filter_map(|id| jobs.get(id).cloned())
+    .collect::<Vec<DownloadJob>>();
+  Ok(Json(queue))
+}
+
 async fn cancel(
   State(context): State<HttpContext>,
   ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -168,14 +198,171 @@ async fn cancel(
   validate_localhost(addr)?;
   let id = uuid::Uuid::parse_str(&job_id).map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
 
-  {
+  let cancelled = {
     let mut jobs = context.state.jobs.lock().await;
     if let Some(job) = jobs.get_mut(&id) {
       job.status = crate::models::DownloadStatus::Cancelled;
       job.completed_at = Some(chrono::Utc::now().to_rfc3339());
+      Some(job.clone())
+    } else {
+      None
     }
+  };
+  if let Some(job) = cancelled {
+    let _ = context.app.emit(EVENT_QUEUE_UPDATED, &job);
   }
 
   let body = HashMap::from([("status", "cancelled")]);
   Ok(Json(body))
+}
+
+async fn open_file(
+  State(context): State<HttpContext>,
+  ConnectInfo(addr): ConnectInfo<SocketAddr>,
+  Path(job_id): Path<String>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+  validate_localhost(addr)?;
+  let id = Uuid::parse_str(&job_id).map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+  let job = get_completed_job(&context, id).await?;
+
+  let output_path = job
+    .output_path
+    .ok_or((StatusCode::BAD_REQUEST, "Downloaded file path is unavailable".to_string()))?;
+  let path = PathBuf::from(output_path);
+  if !path.exists() {
+    return Err((StatusCode::NOT_FOUND, "Downloaded file was not found on disk".to_string()));
+  }
+  if !path.is_file() {
+    return Err((StatusCode::BAD_REQUEST, "Resolved output path is not a file".to_string()));
+  }
+
+  open_path(&path)?;
+  Ok(Json(ActionResponse { status: "ok" }))
+}
+
+async fn open_folder(
+  State(context): State<HttpContext>,
+  ConnectInfo(addr): ConnectInfo<SocketAddr>,
+  Path(job_id): Path<String>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+  validate_localhost(addr)?;
+  let id = Uuid::parse_str(&job_id).map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+  let job = get_completed_job(&context, id).await?;
+
+  let path = if let Some(output_dir) = job.output_dir_resolved {
+    PathBuf::from(output_dir)
+  } else if let Some(output_path) = job.output_path {
+    FsPath::new(&output_path)
+      .parent()
+      .map(FsPath::to_path_buf)
+      .ok_or((StatusCode::BAD_REQUEST, "Could not determine output folder".to_string()))?
+  } else {
+    return Err((StatusCode::BAD_REQUEST, "Output folder is unavailable".to_string()));
+  };
+
+  if !path.exists() {
+    return Err((StatusCode::NOT_FOUND, "Output folder was not found on disk".to_string()));
+  }
+  if !path.is_dir() {
+    return Err((StatusCode::BAD_REQUEST, "Resolved output folder is not a directory".to_string()));
+  }
+
+  open_path(&path)?;
+  Ok(Json(ActionResponse { status: "ok" }))
+}
+
+async fn get_completed_job(
+  context: &HttpContext,
+  id: Uuid,
+) -> Result<DownloadJob, (StatusCode, String)> {
+  let jobs = context.state.jobs.lock().await;
+  let job = jobs
+    .get(&id)
+    .cloned()
+    .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+  if !matches!(job.status, DownloadStatus::Complete) {
+    return Err((StatusCode::BAD_REQUEST, "Job is not complete yet".to_string()));
+  }
+  Ok(job)
+}
+
+fn open_path(path: &FsPath) -> Result<(), (StatusCode, String)> {
+  let platform = if cfg!(target_os = "windows") {
+    Platform::Windows
+  } else if cfg!(target_os = "macos") {
+    Platform::Macos
+  } else {
+    Platform::Linux
+  };
+
+  let (program, args) = build_open_command(platform, path, path.is_dir());
+  let status = Command::new(program)
+    .args(args)
+    .status()
+  .map_err(|error| {
+    (
+      StatusCode::INTERNAL_SERVER_ERROR,
+      format!("Failed to open path '{}': {error}", path.display()),
+    )
+  })?;
+
+  if !status.success() {
+    return Err((
+      StatusCode::INTERNAL_SERVER_ERROR,
+      format!("Open command failed for '{}'", path.display()),
+    ));
+  }
+
+  Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum Platform {
+  Windows,
+  Macos,
+  Linux,
+}
+
+fn build_open_command(platform: Platform, path: &FsPath, is_dir: bool) -> (&'static str, Vec<String>) {
+  match platform {
+    Platform::Windows => {
+      // Never invoke cmd.exe with user-derived paths. This avoids shell metacharacter parsing.
+      if is_dir {
+        ("explorer.exe", vec![path.to_string_lossy().into_owned()])
+      } else {
+        (
+          "rundll32.exe",
+          vec![
+            "url.dll,FileProtocolHandler".to_string(),
+            path.to_string_lossy().into_owned(),
+          ],
+        )
+      }
+    }
+    Platform::Macos => ("open", vec![path.to_string_lossy().into_owned()]),
+    Platform::Linux => ("xdg-open", vec![path.to_string_lossy().into_owned()]),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{build_open_command, Platform};
+  use std::path::Path;
+
+  #[test]
+  fn windows_file_open_does_not_use_cmd_shell() {
+    let path = Path::new(r"C:\Downloads\name&calc.mp4");
+    let (program, args) = build_open_command(Platform::Windows, path, false);
+    assert_eq!(program, "rundll32.exe");
+    assert_eq!(args[0], "url.dll,FileProtocolHandler");
+    assert_eq!(args[1], r"C:\Downloads\name&calc.mp4");
+  }
+
+  #[test]
+  fn windows_folder_open_uses_explorer() {
+    let path = Path::new(r"C:\Downloads");
+    let (program, args) = build_open_command(Platform::Windows, path, true);
+    assert_eq!(program, "explorer.exe");
+    assert_eq!(args, vec![r"C:\Downloads".to_string()]);
+  }
 }

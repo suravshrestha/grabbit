@@ -10,6 +10,7 @@ export type DownloadStatus =
 
 export interface DownloadRequest {
   videoId: string
+  title?: string
   url: string
   format: DownloadFormat
   quality?: '360p' | '720p' | '1080p' | '4k' | 'best'
@@ -26,6 +27,8 @@ export interface DownloadJob {
   speed?: string
   eta?: string
   filename?: string
+  outputPath?: string
+  outputDirResolved?: string
   error?: string
   createdAt: string
   completedAt?: string

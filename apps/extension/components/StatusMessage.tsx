@@ -1,9 +1,34 @@
+import { CheckCircle2, CircleAlert, Info } from 'lucide-react'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+
 interface StatusMessageProps {
   message: string
   tone?: 'info' | 'error' | 'success'
 }
 
 export function StatusMessage({ message, tone = 'info' }: StatusMessageProps): JSX.Element {
-  const color = tone === 'error' ? '#b91c1c' : tone === 'success' ? '#166534' : '#1d4ed8'
-  return <p style={{ color, marginTop: 8 }}>{message}</p>
+  if (tone === 'error') {
+    return (
+      <Alert variant="destructive" className="border-destructive/30 bg-destructive/5">
+        <CircleAlert />
+        <AlertDescription>{message}</AlertDescription>
+      </Alert>
+    )
+  }
+
+  if (tone === 'success') {
+    return (
+      <Alert className="border-success/40 bg-success/20 text-success-foreground">
+        <CheckCircle2 className="text-success-foreground" />
+        <AlertDescription>{message}</AlertDescription>
+      </Alert>
+    )
+  }
+
+  return (
+    <Alert className="border-info/40 bg-info/20 text-info-foreground">
+      <Info className="text-info-foreground" />
+      <AlertDescription>{message}</AlertDescription>
+    </Alert>
+  )
 }
