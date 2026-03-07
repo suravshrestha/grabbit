@@ -1,20 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { DownloadJob, DownloadRequest } from '@/types'
-import { createDownloadJob, getDownloadQueue, getDownloadStatus } from '@/lib/ipc'
+import { createDownloadJob, getDownloadQueue } from '@/lib/ipc'
 import { POLL_INTERVAL_MS } from '@/lib/constants'
 
 interface UseDownloadState {
-  job: DownloadJob | undefined
+  jobs: DownloadJob[]
+  focusedJob: DownloadJob | undefined
   loading: boolean
   error: string | undefined
   startDownload: (request: DownloadRequest) => Promise<void>
 }
 
-const TERMINAL_STATUSES = new Set<DownloadJob['status']>(['complete', 'error', 'cancelled'])
 const NON_TERMINAL_STATUSES = new Set<DownloadJob['status']>(['queued', 'downloading', 'merging'])
 
+function pickFocusedJob(queue: DownloadJob[]): DownloadJob | undefined {
+  const reversed = [...queue].reverse()
+  return reversed.find((value) => NON_TERMINAL_STATUSES.has(value.status)) ?? reversed[0]
+}
+
 export function useDownload(): UseDownloadState {
-  const [job, setJob] = useState<DownloadJob>()
+  const [jobs, setJobs] = useState<DownloadJob[]>([])
+  const [focusedJob, setFocusedJob] = useState<DownloadJob>()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>()
   const timerRef = useRef<number | undefined>(undefined)
@@ -26,43 +32,28 @@ export function useDownload(): UseDownloadState {
     }
   }, [])
 
-  const pollStatus = useCallback(
-    async (jobId: string): Promise<void> => {
-      const latest = await getDownloadStatus(jobId)
-      setJob(latest)
-      if (TERMINAL_STATUSES.has(latest.status)) {
-        stopPolling()
-      }
-    },
-    [stopPolling],
-  )
+  const refreshQueue = useCallback(async (): Promise<void> => {
+    const queue = await getDownloadQueue()
+    setJobs(queue)
+    setFocusedJob(pickFocusedJob(queue))
+  }, [])
 
-  const startPolling = useCallback(
-    (jobId: string): void => {
-      stopPolling()
-      void pollStatus(jobId).catch((pollError: unknown) => {
-        stopPolling()
-        setError(pollError instanceof Error ? pollError.message : 'Failed to fetch download status')
+  const startPolling = useCallback((): void => {
+    stopPolling()
+    timerRef.current = window.setInterval(() => {
+      void refreshQueue().catch((pollError: unknown) => {
+        setError(pollError instanceof Error ? pollError.message : 'Failed to fetch download queue')
       })
-      timerRef.current = window.setInterval(() => {
-        void pollStatus(jobId).catch((pollError: unknown) => {
-          stopPolling()
-          setError(
-            pollError instanceof Error ? pollError.message : 'Failed to fetch download status',
-          )
-        })
-      }, POLL_INTERVAL_MS)
-    },
-    [pollStatus, stopPolling],
-  )
+    }, POLL_INTERVAL_MS)
+  }, [refreshQueue, stopPolling])
 
   const startDownload = async (request: DownloadRequest): Promise<void> => {
     setLoading(true)
     setError(undefined)
 
     try {
-      const { jobId } = await createDownloadJob(request)
-      startPolling(jobId)
+      await createDownloadJob(request)
+      await refreshQueue()
     } catch (downloadError) {
       setError(downloadError instanceof Error ? downloadError.message : 'Unknown download error')
     } finally {
@@ -72,33 +63,14 @@ export function useDownload(): UseDownloadState {
 
   const hydrateFromQueue = useCallback(async (): Promise<void> => {
     try {
-      const queue = await getDownloadQueue()
-      if (queue.length === 0) {
-        setJob(undefined)
-        stopPolling()
-        return
-      }
-
-      const reversed = [...queue].reverse()
-      const latestNonTerminal = reversed.find((value) => NON_TERMINAL_STATUSES.has(value.status))
-      const selected = latestNonTerminal ?? reversed[0]
-      if (selected === undefined) {
-        return
-      }
-
-      setJob(selected)
+      await refreshQueue()
       setError(undefined)
-
-      if (NON_TERMINAL_STATUSES.has(selected.status)) {
-        startPolling(selected.id)
-      } else {
-        stopPolling()
-      }
+      startPolling()
     } catch {
       // Best-effort rehydrate: silently skip when desktop server is unavailable.
       stopPolling()
     }
-  }, [startPolling, stopPolling])
+  }, [refreshQueue, startPolling, stopPolling])
 
   useEffect(() => {
     void hydrateFromQueue()
@@ -106,7 +78,8 @@ export function useDownload(): UseDownloadState {
   }, [hydrateFromQueue, stopPolling])
 
   return {
-    job,
+    jobs,
+    focusedJob,
     loading,
     error,
     startDownload,

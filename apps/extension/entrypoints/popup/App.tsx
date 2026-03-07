@@ -49,7 +49,7 @@ const ACTIVE_STATUSES = new Set<DownloadStatus>(['queued', 'downloading', 'mergi
 export function App(): JSX.Element {
   const currentTab = useCurrentTab()
   const desktopRunning = useDesktopApp()
-  const { job, loading, error, startDownload } = useDownload()
+  const { jobs, focusedJob, loading, error, startDownload } = useDownload()
 
   const [format, setFormat] = useState<DownloadFormat>('mp4')
   const [quality, setQuality] = useState<'720p' | '1080p' | '4k' | 'best'>('1080p')
@@ -102,6 +102,7 @@ export function App(): JSX.Element {
 
   // Scroll to and flash the Download Status card when a new job starts
   useEffect(() => {
+    const job = focusedJob
     if (job && job.id !== prevJobIdRef.current) {
       prevJobIdRef.current = job.id
       downloadStatusRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -114,7 +115,7 @@ export function App(): JSX.Element {
       setActionError(undefined)
       setActionLoading(null)
     }
-  }, [job])
+  }, [focusedJob])
 
   const subtitleTracks = videoInfo?.subtitleTracks ?? []
   const subtitleMode = format === 'srt' || format === 'vtt'
@@ -164,6 +165,7 @@ export function App(): JSX.Element {
   }
 
   const handleOpenFile = async (): Promise<void> => {
+    const job = focusedJob
     if (!job) {
       return
     }
@@ -181,6 +183,7 @@ export function App(): JSX.Element {
   }
 
   const handleOpenFolder = async (): Promise<void> => {
+    const job = focusedJob
     if (!job) {
       return
     }
@@ -197,13 +200,15 @@ export function App(): JSX.Element {
     }
   }
 
+  const job = focusedJob
   const completedAtLabel =
     job?.completedAt === undefined ? undefined : new Date(job.completedAt).toLocaleString()
-
+  const hasActiveJobs = jobs.some((entry) => ACTIVE_STATUSES.has(entry.status))
   const isDownloading = job !== undefined && ACTIVE_STATUSES.has(job.status)
   const controlsLocked = loading
   const canDownload = desktopRunning && !!videoId && (!subtitleMode || !!selectedSubtitleTrack)
-  const downloadActionLabel = isDownloading ? 'Add to Queue' : 'Start Download'
+  const downloadActionLabel = hasActiveJobs ? 'Add to Queue' : 'Start Download'
+  const queueItems = [...jobs].reverse()
 
   return (
     <main className="w-[360px] bg-[radial-gradient(circle_at_top,_#fff1f2,_#ffffff_48%)] p-3">
@@ -290,6 +295,31 @@ export function App(): JSX.Element {
           <StatusMessage message="Open a YouTube watch page, then reopen the popup." tone="error" />
         )}
         {infoError && <StatusMessage message={infoError} tone="error" />}
+
+        {queueItems.length > 0 && (
+          <Card className="gap-3 py-4">
+            <CardHeader className="px-4">
+              <CardTitle className="text-sm">Queue</CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-2 px-4">
+              {queueItems.map((entry) => (
+                <div key={entry.id} className="bg-muted/30 grid gap-1 rounded-md border px-3 py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-foreground truncate text-xs font-medium">
+                      {entry.request.videoId}
+                    </p>
+                    <span className="text-muted-foreground text-[11px]">
+                      {STATUS_LABEL[entry.status]}
+                    </span>
+                  </div>
+                  <p className="text-muted-foreground text-[11px] tabular-nums">
+                    {entry.progress.toFixed(1)}%
+                  </p>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        )}
 
         {job && (
           <div ref={downloadStatusRef}>
