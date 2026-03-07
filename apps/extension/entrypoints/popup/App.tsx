@@ -25,33 +25,22 @@ function toSubtitleTrackValue(lang: string, source: 'manual' | 'auto'): string {
   return `${source}:${lang}`
 }
 
-function statusTone(status: DownloadStatus): 'info' | 'error' | 'success' {
-  if (status === 'error' || status === 'cancelled') {
-    return 'error'
-  }
-  if (status === 'complete') {
-    return 'success'
-  }
-  return 'info'
+const STATUS_TONE: Record<DownloadStatus, 'info' | 'error' | 'success'> = {
+  queued: 'info',
+  downloading: 'info',
+  merging: 'info',
+  complete: 'success',
+  error: 'error',
+  cancelled: 'error',
 }
 
-function statusLabel(status: DownloadStatus): string {
-  if (status === 'queued') {
-    return 'Queued'
-  }
-  if (status === 'downloading') {
-    return 'Downloading'
-  }
-  if (status === 'merging') {
-    return 'Merging'
-  }
-  if (status === 'complete') {
-    return 'Completed'
-  }
-  if (status === 'cancelled') {
-    return 'Cancelled'
-  }
-  return 'Failed'
+const STATUS_LABEL: Record<DownloadStatus, string> = {
+  queued: 'Queued',
+  downloading: 'Downloading',
+  merging: 'Merging',
+  complete: 'Completed',
+  error: 'Failed',
+  cancelled: 'Cancelled',
 }
 
 export function App(): JSX.Element {
@@ -80,19 +69,26 @@ export function App(): JSX.Element {
       return
     }
 
+    let cancelled = false
     setInfoLoading(true)
     void (async (): Promise<void> => {
       try {
         const info = await fetchVideoInfo(videoId)
+        if (cancelled) return
         setVideoInfo(info)
         setInfoError(undefined)
       } catch (fetchError) {
+        if (cancelled) return
         setVideoInfo(undefined)
         setInfoError(fetchError instanceof Error ? fetchError.message : 'Failed to load video info')
       } finally {
-        setInfoLoading(false)
+        if (!cancelled) setInfoLoading(false)
       }
     })()
+
+    return () => {
+      cancelled = true
+    }
   }, [desktopRunning, videoId])
 
   const subtitleTracks = videoInfo?.subtitleTracks ?? []
@@ -238,8 +234,8 @@ export function App(): JSX.Element {
             <CardContent className="grid gap-3 px-4">
               <ProgressBar progress={job.progress} />
               <StatusMessage
-                message={`Status: ${statusLabel(job.status)}`}
-                tone={statusTone(job.status)}
+                message={`Status: ${STATUS_LABEL[job.status]}`}
+                tone={STATUS_TONE[job.status]}
               />
             </CardContent>
           </Card>

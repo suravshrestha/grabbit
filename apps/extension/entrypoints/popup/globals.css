@@ -1,6 +1,7 @@
 @import 'tailwindcss';
 
-@source '../../**/*.{ts,tsx,html}';
+@source '../../components/**/*.{ts,tsx}';
+@source '../../entrypoints/**/*.{ts,tsx,html}';
 
 :root {
   --background: oklch(0.99 0.005 17);
@@ -19,6 +20,10 @@
   --accent-foreground: oklch(0.35 0.05 26);
   --destructive: oklch(0.57 0.24 27);
   --destructive-foreground: oklch(0.98 0 0);
+  --success: oklch(0.87 0.09 150);
+  --success-foreground: oklch(0.28 0.08 150);
+  --info: oklch(0.88 0.06 240);
+  --info-foreground: oklch(0.30 0.08 240);
   --border: oklch(0.89 0.01 20);
   --input: oklch(0.92 0.01 20);
   --ring: oklch(0.62 0.24 28);
@@ -42,6 +47,10 @@
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
