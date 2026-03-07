@@ -287,15 +287,18 @@ async fn get_completed_job(
 }
 
 fn open_path(path: &FsPath) -> Result<(), (StatusCode, String)> {
-  let status = if cfg!(target_os = "windows") {
-    Command::new("cmd")
-      .args(["/C", "start", "", path.to_string_lossy().as_ref()])
-      .status()
+  let platform = if cfg!(target_os = "windows") {
+    Platform::Windows
   } else if cfg!(target_os = "macos") {
-    Command::new("open").arg(path).status()
+    Platform::Macos
   } else {
-    Command::new("xdg-open").arg(path).status()
-  }
+    Platform::Linux
+  };
+
+  let (program, args) = build_open_command(platform, path, path.is_dir());
+  let status = Command::new(program)
+    .args(args)
+    .status()
   .map_err(|error| {
     (
       StatusCode::INTERNAL_SERVER_ERROR,
@@ -311,4 +314,55 @@ fn open_path(path: &FsPath) -> Result<(), (StatusCode, String)> {
   }
 
   Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum Platform {
+  Windows,
+  Macos,
+  Linux,
+}
+
+fn build_open_command(platform: Platform, path: &FsPath, is_dir: bool) -> (&'static str, Vec<String>) {
+  match platform {
+    Platform::Windows => {
+      // Never invoke cmd.exe with user-derived paths. This avoids shell metacharacter parsing.
+      if is_dir {
+        ("explorer.exe", vec![path.to_string_lossy().into_owned()])
+      } else {
+        (
+          "rundll32.exe",
+          vec![
+            "url.dll,FileProtocolHandler".to_string(),
+            path.to_string_lossy().into_owned(),
+          ],
+        )
+      }
+    }
+    Platform::Macos => ("open", vec![path.to_string_lossy().into_owned()]),
+    Platform::Linux => ("xdg-open", vec![path.to_string_lossy().into_owned()]),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{build_open_command, Platform};
+  use std::path::Path;
+
+  #[test]
+  fn windows_file_open_does_not_use_cmd_shell() {
+    let path = Path::new(r"C:\Downloads\name&calc.mp4");
+    let (program, args) = build_open_command(Platform::Windows, path, false);
+    assert_eq!(program, "rundll32.exe");
+    assert_eq!(args[0], "url.dll,FileProtocolHandler");
+    assert_eq!(args[1], r"C:\Downloads\name&calc.mp4");
+  }
+
+  #[test]
+  fn windows_folder_open_uses_explorer() {
+    let path = Path::new(r"C:\Downloads");
+    let (program, args) = build_open_command(Platform::Windows, path, true);
+    assert_eq!(program, "explorer.exe");
+    assert_eq!(args, vec![r"C:\Downloads".to_string()]);
+  }
 }
