@@ -103,17 +103,25 @@ export function App(): JSX.Element {
   // Scroll to and flash the Download Status card when a new job starts
   useEffect(() => {
     const job = focusedJob
+    let flashTimer: number | undefined
     if (job && job.id !== prevJobIdRef.current) {
       prevJobIdRef.current = job.id
       downloadStatusRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       setStatusFlash(true)
+      flashTimer = window.setTimeout(() => setStatusFlash(false), 900)
       setActionError(undefined)
       setActionLoading(null)
     }
     if (!job) {
       prevJobIdRef.current = undefined
+      setStatusFlash(false)
       setActionError(undefined)
       setActionLoading(null)
+    }
+    return () => {
+      if (flashTimer !== undefined) {
+        window.clearTimeout(flashTimer)
+      }
     }
   }, [focusedJob])
 
@@ -219,18 +227,21 @@ export function App(): JSX.Element {
   const queueItems = [...jobs].reverse()
 
   return (
-    <main className="w-[360px] bg-[radial-gradient(circle_at_top,_#fff1f2,_#ffffff_48%)] p-3">
-      <div className="grid gap-3">
+    <main className="mx-auto w-[360px] min-w-0 max-w-full overflow-x-hidden bg-[radial-gradient(circle_at_top,_#fff1f2,_#ffffff_48%)] p-3">
+      <div className="grid min-w-0 gap-3">
         <Card className="gap-3 border-red-100/80 py-4 shadow-sm">
           <CardHeader className="px-4">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-base">Grabbit</CardTitle>
-              <Badge variant={desktopRunning ? 'success' : 'destructive'}>
+            <div className="flex min-w-0 items-center justify-between gap-2">
+              <CardTitle className="min-w-0 truncate text-base">Grabbit</CardTitle>
+              <Badge
+                className="max-w-32 truncate"
+                variant={desktopRunning ? 'success' : 'destructive'}
+              >
                 {desktopRunning ? 'Desktop Online' : 'Desktop Offline'}
               </Badge>
             </div>
           </CardHeader>
-          <CardContent className="text-muted-foreground px-4 text-xs">
+          <CardContent className="text-muted-foreground line-clamp-2 px-4 text-xs">
             Save videos, audio, and subtitles from your current YouTube tab.
           </CardContent>
         </Card>
@@ -305,38 +316,38 @@ export function App(): JSX.Element {
         {infoError && <StatusMessage message={infoError} tone="error" />}
 
         {queueItems.length > 0 && (
-          <Card className="gap-3 py-4">
+          <Card className="gap-2 py-4">
             <CardHeader className="px-4">
               <CardTitle className="text-sm">Queue</CardTitle>
             </CardHeader>
-            <CardContent className="grid gap-2 px-4">
+            <CardContent className="grid max-h-56 gap-2 overflow-x-hidden overflow-y-scroll px-4 [scrollbar-gutter:stable]">
               {queueItems.map((entry) => (
                 <button
                   key={entry.id}
-                  className={`bg-muted/30 grid w-full gap-1 rounded-md border px-3 py-2 text-left transition-colors ${
+                  className={`bg-muted/30 w-full rounded-md border px-3 py-2 text-left transition-colors ${
                     job?.id === entry.id ? 'border-primary/50 bg-primary/5' : 'hover:bg-muted/50'
                   }`}
                   onClick={() => setFocusedJob(entry.id)}
                   type="button"
                 >
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-foreground truncate text-xs font-medium">
+                  <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                    <p className="text-foreground block w-full min-w-0 truncate text-xs font-medium">
                       {entry.request.title ?? entry.filename ?? entry.request.videoId}
                     </p>
-                    <span className="text-muted-foreground text-[11px]">
+                    <span className="text-muted-foreground shrink-0 whitespace-nowrap text-[11px]">
                       {STATUS_LABEL[entry.status]}
                     </span>
                   </div>
-                  <p className="text-muted-foreground text-[11px] tabular-nums">
-                    {entry.progress.toFixed(1)}%
-                  </p>
-                  {ACTIVE_STATUSES.has(entry.status) && (entry.speed || entry.eta) && (
-                    <p className="text-muted-foreground text-[11px] tabular-nums">
-                      {entry.speed ? `Speed: ${entry.speed}` : 'Speed: —'}
-                      {' • '}
-                      {entry.eta ? `ETA: ${entry.eta}` : 'ETA: —'}
-                    </p>
-                  )}
+                  <div className="text-muted-foreground mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] tabular-nums">
+                    <span className="shrink-0">{entry.progress.toFixed(1)}%</span>
+                    {ACTIVE_STATUSES.has(entry.status) && (
+                      <span className="min-w-0 whitespace-normal break-words">
+                        {entry.speed ? `Speed: ${entry.speed}` : 'Speed: —'}
+                        {' • '}
+                        {entry.eta ? `ETA: ${entry.eta}` : 'ETA: —'}
+                      </span>
+                    )}
+                  </div>
                 </button>
               ))}
             </CardContent>
@@ -346,8 +357,7 @@ export function App(): JSX.Element {
         {job && (
           <div ref={downloadStatusRef}>
             <Card
-              className={`gap-3 py-4 transition-shadow${statusFlash ? 'status-flash' : ''}`}
-              onAnimationEnd={() => setStatusFlash(false)}
+              className={`gap-3 py-4 transition-colors ${statusFlash ? 'bg-primary/5 ring-primary/40 ring-2 ring-inset' : ''}`}
             >
               <CardHeader className="px-4">
                 <CardTitle className="text-sm">Download Status</CardTitle>
@@ -355,7 +365,7 @@ export function App(): JSX.Element {
               <CardContent className="grid gap-3 px-4">
                 <ProgressBar progress={job.progress} />
                 {isDownloading && (job.speed || job.eta) && (
-                  <p className="text-muted-foreground text-xs tabular-nums">
+                  <p className="text-muted-foreground min-w-0 truncate text-xs tabular-nums">
                     {job.speed ? `Speed: ${job.speed}` : 'Speed: —'}
                     {' • '}
                     {job.eta ? `ETA: ${job.eta}` : 'ETA: —'}
@@ -368,17 +378,28 @@ export function App(): JSX.Element {
                 {job.status === 'complete' && (
                   <div className="bg-muted/40 grid gap-2 rounded-lg border px-3 py-2">
                     {job.filename && (
-                      <p className="text-foreground break-all text-sm font-medium">
+                      <p
+                        className="text-foreground truncate text-sm font-medium"
+                        title={job.filename}
+                      >
                         {job.filename}
                       </p>
                     )}
                     {job.outputDirResolved && (
-                      <p className="text-muted-foreground break-all text-xs">
+                      <p
+                        className="text-muted-foreground truncate text-xs"
+                        title={job.outputDirResolved}
+                      >
                         Folder: {job.outputDirResolved}
                       </p>
                     )}
                     {completedAtLabel && (
-                      <p className="text-muted-foreground text-xs">Completed: {completedAtLabel}</p>
+                      <p
+                        className="text-muted-foreground truncate text-xs"
+                        title={completedAtLabel}
+                      >
+                        Completed: {completedAtLabel}
+                      </p>
                     )}
                     <div className="flex gap-2">
                       <Button

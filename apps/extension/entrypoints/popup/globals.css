@@ -57,7 +57,10 @@
 }
 
 @layer base {
-  * {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
     @apply border-border;
   }
 
@@ -65,10 +68,16 @@
   body,
   #root {
     @apply bg-background text-foreground m-0 min-h-full antialiased;
+    width: 376px;
+    min-width: 376px;
+    max-width: 376px;
+    overflow-x: hidden;
   }
 
   body {
     font-family: Inter, 'Segoe UI', sans-serif;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
   }
 
   /* Native select styled to match shadcn SelectTrigger */
@@ -79,20 +88,5 @@
     background-position: right 0.625rem center;
     background-size: 1rem;
     padding-right: 2.25rem;
-  }
-}
-
-@keyframes status-flash-pulse {
-  0% {
-    box-shadow: 0 0 0 0 oklch(0.62 0.24 28 / 0.32);
-  }
-  100% {
-    box-shadow: 0 0 0 10px oklch(0.62 0.24 28 / 0);
-  }
-}
-
-@layer utilities {
-  .status-flash {
-    animation: status-flash-pulse 850ms ease-out 1;
   }
 }
