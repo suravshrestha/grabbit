@@ -98,6 +98,10 @@ export async function getDownloadStatus(jobId: string): Promise<DownloadJob> {
   return request<DownloadJob>(`/api/status/${encodeURIComponent(jobId)}`)
 }
 
+export async function getDownloadQueue(): Promise<DownloadJob[]> {
+  return request<DownloadJob[]>('/api/queue')
+}
+
 export async function openDownloadedFile(jobId: string): Promise<void> {
   await request<{ status: string }>(`/api/jobs/${encodeURIComponent(jobId)}/open-file`, {
     method: 'POST',

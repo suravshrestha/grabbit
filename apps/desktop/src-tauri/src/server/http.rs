@@ -77,6 +77,7 @@ pub async fn start_http_server(app: AppHandle, state: AppState) -> Result<(), St
     .route("/api/health", get(health))
     .route("/api/info", get(info))
     .route("/api/download", post(download))
+    .route("/api/queue", get(queue))
     .route("/api/status/:job_id", get(status))
     .route("/api/jobs/:job_id/open-file", post(open_file))
     .route("/api/jobs/:job_id/open-folder", post(open_folder))
@@ -173,6 +174,20 @@ async fn status(
       .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?
   };
   Ok(Json(job))
+}
+
+async fn queue(
+  State(context): State<HttpContext>,
+  ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Result<Json<Vec<DownloadJob>>, (StatusCode, String)> {
+  validate_localhost(addr)?;
+  let order = context.state.order.lock().await;
+  let jobs = context.state.jobs.lock().await;
+  let queue = order
+    .iter()
+    .filter_map(|id| jobs.get(id).cloned())
+    .collect::<Vec<DownloadJob>>();
+  Ok(Json(queue))
 }
 
 async fn cancel(
