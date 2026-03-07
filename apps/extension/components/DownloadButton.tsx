@@ -4,10 +4,18 @@ import { Button } from '@/components/ui/button'
 interface DownloadButtonProps {
   disabled?: boolean
   loading?: boolean
+  idleLabel?: string
+  loadingLabel?: string
   onClick: () => void
 }
 
-export function DownloadButton({ disabled, loading, onClick }: DownloadButtonProps): JSX.Element {
+export function DownloadButton({
+  disabled,
+  loading,
+  idleLabel = 'Start Download',
+  loadingLabel = 'Adding to Queue...',
+  onClick,
+}: DownloadButtonProps): JSX.Element {
   return (
     <Button
       className="w-full rounded-lg font-semibold"
@@ -18,12 +26,12 @@ export function DownloadButton({ disabled, loading, onClick }: DownloadButtonPro
       {loading ? (
         <>
           <LoaderCircle className="size-4 animate-spin" />
-          Downloading...
+          {loadingLabel}
         </>
       ) : (
         <>
           <Rocket className="size-4" />
-          Start Download
+          {idleLabel}
         </>
       )}
     </Button>

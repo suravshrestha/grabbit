@@ -201,8 +201,9 @@ export function App(): JSX.Element {
     job?.completedAt === undefined ? undefined : new Date(job.completedAt).toLocaleString()
 
   const isDownloading = job !== undefined && ACTIVE_STATUSES.has(job.status)
-  const controlsLocked = loading || isDownloading
+  const controlsLocked = loading
   const canDownload = desktopRunning && !!videoId && (!subtitleMode || !!selectedSubtitleTrack)
+  const downloadActionLabel = isDownloading ? 'Add to Queue' : 'Start Download'
 
   return (
     <main className="w-[360px] bg-[radial-gradient(circle_at_top,_#fff1f2,_#ffffff_48%)] p-3">
@@ -275,6 +276,8 @@ export function App(): JSX.Element {
             <DownloadButton
               disabled={!canDownload || controlsLocked}
               loading={loading}
+              idleLabel={downloadActionLabel}
+              loadingLabel="Adding to Queue..."
               onClick={() => void handleDownload()}
             />
           </CardContent>
