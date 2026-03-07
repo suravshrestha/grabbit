@@ -10,21 +10,31 @@ function toTrackValue(track: SubtitleTrack): string {
   return `${track.source}:${track.lang}`
 }
 
+function getTrackLabel(track: SubtitleTrack): string {
+  return `${track.name} (${track.lang})${track.source === 'auto' ? ' • Auto' : ''}`
+}
+
 export function SubtitleTrackSelector({
   tracks,
   value,
   onChange,
 }: SubtitleTrackSelectorProps): JSX.Element {
   return (
-    <label>
-      Subtitle track
-      <select value={value} onChange={(event) => onChange(event.target.value)}>
+    <div className="grid gap-2">
+      <label className="text-muted-foreground text-xs font-semibold uppercase tracking-wide">
+        Subtitle Track
+      </label>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="styled-select border-input bg-card shadow-xs focus-visible:border-ring focus-visible:ring-ring/50 h-9 w-full rounded-md border px-3 py-2 text-sm outline-none transition-[color,box-shadow] focus-visible:ring-[3px]"
+      >
         {tracks.map((track) => (
           <option key={toTrackValue(track)} value={toTrackValue(track)}>
-            {track.name} ({track.lang})
+            {getTrackLabel(track)}
           </option>
         ))}
       </select>
-    </label>
+    </div>
   )
 }
