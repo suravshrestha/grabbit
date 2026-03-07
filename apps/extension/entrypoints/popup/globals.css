@@ -23,7 +23,7 @@
   --success: oklch(0.87 0.09 150);
   --success-foreground: oklch(0.28 0.08 150);
   --info: oklch(0.88 0.06 240);
-  --info-foreground: oklch(0.30 0.08 240);
+  --info-foreground: oklch(0.3 0.08 240);
   --border: oklch(0.89 0.01 20);
   --input: oklch(0.92 0.01 20);
   --ring: oklch(0.62 0.24 28);
