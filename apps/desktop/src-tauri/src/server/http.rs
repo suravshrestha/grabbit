@@ -13,7 +13,12 @@ use axum::{
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, net::SocketAddr};
+use std::{
+  collections::HashMap,
+  net::SocketAddr,
+  path::{Path as FsPath, PathBuf},
+  process::Command,
+};
 use tauri::{AppHandle, Emitter};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
@@ -34,6 +39,11 @@ struct HealthResponse {
 struct DownloadResponse {
   #[serde(rename = "jobId")]
   job_id: String,
+}
+
+#[derive(Serialize)]
+struct ActionResponse {
+  status: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -68,6 +78,8 @@ pub async fn start_http_server(app: AppHandle, state: AppState) -> Result<(), St
     .route("/api/info", get(info))
     .route("/api/download", post(download))
     .route("/api/status/:job_id", get(status))
+    .route("/api/jobs/:job_id/open-file", post(open_file))
+    .route("/api/jobs/:job_id/open-folder", post(open_folder))
     .route("/api/jobs/:job_id", delete(cancel))
     .layer(cors)
     .with_state(context);
@@ -119,6 +131,8 @@ async fn download(
     speed: None,
     eta: None,
     filename: None,
+    output_path: None,
+    output_dir_resolved: None,
     error: None,
     created_at: Utc::now().to_rfc3339(),
     completed_at: None,
@@ -185,4 +199,101 @@ async fn cancel(
 
   let body = HashMap::from([("status", "cancelled")]);
   Ok(Json(body))
+}
+
+async fn open_file(
+  State(context): State<HttpContext>,
+  ConnectInfo(addr): ConnectInfo<SocketAddr>,
+  Path(job_id): Path<String>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+  validate_localhost(addr)?;
+  let id = Uuid::parse_str(&job_id).map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+  let job = get_completed_job(&context, id).await?;
+
+  let output_path = job
+    .output_path
+    .ok_or((StatusCode::BAD_REQUEST, "Downloaded file path is unavailable".to_string()))?;
+  let path = PathBuf::from(output_path);
+  if !path.exists() {
+    return Err((StatusCode::NOT_FOUND, "Downloaded file was not found on disk".to_string()));
+  }
+  if !path.is_file() {
+    return Err((StatusCode::BAD_REQUEST, "Resolved output path is not a file".to_string()));
+  }
+
+  open_path(&path)?;
+  Ok(Json(ActionResponse { status: "ok" }))
+}
+
+async fn open_folder(
+  State(context): State<HttpContext>,
+  ConnectInfo(addr): ConnectInfo<SocketAddr>,
+  Path(job_id): Path<String>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+  validate_localhost(addr)?;
+  let id = Uuid::parse_str(&job_id).map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+  let job = get_completed_job(&context, id).await?;
+
+  let path = if let Some(output_dir) = job.output_dir_resolved {
+    PathBuf::from(output_dir)
+  } else if let Some(output_path) = job.output_path {
+    FsPath::new(&output_path)
+      .parent()
+      .map(FsPath::to_path_buf)
+      .ok_or((StatusCode::BAD_REQUEST, "Could not determine output folder".to_string()))?
+  } else {
+    return Err((StatusCode::BAD_REQUEST, "Output folder is unavailable".to_string()));
+  };
+
+  if !path.exists() {
+    return Err((StatusCode::NOT_FOUND, "Output folder was not found on disk".to_string()));
+  }
+  if !path.is_dir() {
+    return Err((StatusCode::BAD_REQUEST, "Resolved output folder is not a directory".to_string()));
+  }
+
+  open_path(&path)?;
+  Ok(Json(ActionResponse { status: "ok" }))
+}
+
+async fn get_completed_job(
+  context: &HttpContext,
+  id: Uuid,
+) -> Result<DownloadJob, (StatusCode, String)> {
+  let jobs = context.state.jobs.lock().await;
+  let job = jobs
+    .get(&id)
+    .cloned()
+    .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+  if !matches!(job.status, DownloadStatus::Complete) {
+    return Err((StatusCode::BAD_REQUEST, "Job is not complete yet".to_string()));
+  }
+  Ok(job)
+}
+
+fn open_path(path: &FsPath) -> Result<(), (StatusCode, String)> {
+  let status = if cfg!(target_os = "windows") {
+    Command::new("cmd")
+      .args(["/C", "start", "", path.to_string_lossy().as_ref()])
+      .status()
+  } else if cfg!(target_os = "macos") {
+    Command::new("open").arg(path).status()
+  } else {
+    Command::new("xdg-open").arg(path).status()
+  }
+  .map_err(|error| {
+    (
+      StatusCode::INTERNAL_SERVER_ERROR,
+      format!("Failed to open path '{}': {error}", path.display()),
+    )
+  })?;
+
+  if !status.success() {
+    return Err((
+      StatusCode::INTERNAL_SERVER_ERROR,
+      format!("Open command failed for '{}'", path.display()),
+    ));
+  }
+
+  Ok(())
 }

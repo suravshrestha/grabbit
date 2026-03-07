@@ -22,6 +22,8 @@ pub async fn download_video(
     speed: None,
     eta: None,
     filename: None,
+    output_path: None,
+    output_dir_resolved: None,
     error: None,
     created_at: Utc::now().to_rfc3339(),
     completed_at: None,

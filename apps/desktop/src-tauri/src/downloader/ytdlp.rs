@@ -145,6 +145,14 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
     return Ok(());
   }
 
+  let output_dir_value = output_dir.to_string_lossy().to_string();
+  {
+    let mut jobs = state.jobs.lock().await;
+    if let Some(job) = jobs.get_mut(&job_id) {
+      job.output_dir_resolved = Some(output_dir_value);
+    }
+  }
+
   let output_template = output_dir
     .join("%(title)s.%(ext)s")
     .to_string_lossy()
@@ -300,6 +308,30 @@ async fn run_ytdlp_attempt(
         if let Some(error_line) = extract_error_line(&line) {
           last_error_line = Some(error_line);
         }
+        if let Some(output_path) = extract_output_path_line(&line) {
+          let snapshot = {
+            let mut jobs = state.jobs.lock().await;
+            if let Some(job) = jobs.get_mut(&job_id) {
+              let filename = Path::new(&output_path)
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string());
+              let changed = job.output_path.as_deref() != Some(output_path.as_str())
+                || job.filename != filename;
+              if changed {
+                job.output_path = Some(output_path);
+                job.filename = filename;
+                Some(job.clone())
+              } else {
+                None
+              }
+            } else {
+              None
+            }
+          };
+          if let Some(job) = snapshot {
+            let _ = app.emit(EVENT_QUEUE_UPDATED, &job);
+          }
+        }
         if let Some(progress) = parse_progress_line(&line) {
           let snapshot = {
             let mut jobs = state.jobs.lock().await;
@@ -379,6 +411,42 @@ fn extract_error_line(line: &str) -> Option<String> {
   }
 
   None
+}
+
+fn extract_output_path_line(line: &str) -> Option<String> {
+  let message = line.trim();
+  if message.is_empty() {
+    return None;
+  }
+
+  if let Some(path) = message.split_once("Destination:").map(|(_, value)| value.trim()) {
+    return normalize_output_path(path);
+  }
+
+  if let Some(path) = message
+    .split_once("Merging formats into")
+    .map(|(_, value)| value.trim())
+  {
+    return normalize_output_path(path);
+  }
+
+  if let Some((prefix, _)) = message.split_once(" has already been downloaded") {
+    let path = prefix
+      .strip_prefix("[download]")
+      .map(str::trim)
+      .unwrap_or(prefix.trim());
+    return normalize_output_path(path);
+  }
+
+  None
+}
+
+fn normalize_output_path(raw: &str) -> Option<String> {
+  let trimmed = raw.trim().trim_matches('"').trim_matches('\'');
+  if trimmed.is_empty() {
+    return None;
+  }
+  Some(trimmed.to_string())
 }
 
 fn is_auth_error_line(line: &str) -> bool {
@@ -646,9 +714,9 @@ async fn is_job_cancelled(state: &AppState, job_id: uuid::Uuid) -> Result<bool, 
 #[cfg(test)]
 mod tests {
   use super::{
-    build_download_args, expand_tilde_path, is_auth_error_line, map_video_info,
-    parse_subtitle_tracks, resolve_output_dir_from, should_retry_with_browser_cookies,
-    AttemptResult,
+    AttemptResult, build_download_args, expand_tilde_path, extract_output_path_line,
+    is_auth_error_line, map_video_info, parse_subtitle_tracks, resolve_output_dir_from,
+    should_retry_with_browser_cookies,
   };
   use crate::models::{DownloadFormat, SubtitleSource};
   use serde_json::json;
@@ -825,5 +893,21 @@ mod tests {
       auth_error_detected: true,
     };
     assert!(!should_retry_with_browser_cookies(&succeeded));
+  }
+
+  #[test]
+  fn extract_output_path_line_reads_destination_and_merger_messages() {
+    assert_eq!(
+      extract_output_path_line("[download] Destination: /tmp/demo.mp4"),
+      Some("/tmp/demo.mp4".to_string())
+    );
+    assert_eq!(
+      extract_output_path_line("[Merger] Merging formats into \"/tmp/demo.mp4\""),
+      Some("/tmp/demo.mp4".to_string())
+    );
+    assert_eq!(
+      extract_output_path_line("[download] /tmp/demo.mp4 has already been downloaded"),
+      Some("/tmp/demo.mp4".to_string())
+    );
   }
 }

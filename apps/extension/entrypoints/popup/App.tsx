@@ -6,6 +6,7 @@ import type {
   VideoInfo,
 } from '@grabbit/shared-types'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -18,7 +19,7 @@ import { SubtitleTrackSelector } from '@/components/subtitle-track-selector'
 import { useCurrentTab } from '@/hooks/useCurrentTab'
 import { useDesktopApp } from '@/hooks/useDesktopApp'
 import { useDownload } from '@/hooks/useDownload'
-import { fetchVideoInfo } from '@/lib/ipc'
+import { fetchVideoInfo, openDownloadFolder, openDownloadedFile } from '@/lib/ipc'
 import { extractVideoId } from '@/lib/youtube'
 
 function toSubtitleTrackValue(lang: string, source: 'manual' | 'auto'): string {
@@ -57,6 +58,8 @@ export function App(): JSX.Element {
   const [infoError, setInfoError] = useState<string>()
   const [infoLoading, setInfoLoading] = useState(false)
   const [statusFlash, setStatusFlash] = useState(false)
+  const [actionLoading, setActionLoading] = useState<'file' | 'folder' | null>(null)
+  const [actionError, setActionError] = useState<string>()
 
   const downloadStatusRef = useRef<HTMLDivElement>(null)
   const prevJobIdRef = useRef<string | undefined>(undefined)
@@ -103,9 +106,13 @@ export function App(): JSX.Element {
       prevJobIdRef.current = job.id
       downloadStatusRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       setStatusFlash(true)
+      setActionError(undefined)
+      setActionLoading(null)
     }
     if (!job) {
       prevJobIdRef.current = undefined
+      setActionError(undefined)
+      setActionLoading(null)
     }
   }, [job])
 
@@ -155,6 +162,43 @@ export function App(): JSX.Element {
 
     await startDownload(payload)
   }
+
+  const handleOpenFile = async (): Promise<void> => {
+    if (!job) {
+      return
+    }
+    setActionLoading('file')
+    setActionError(undefined)
+    try {
+      await openDownloadedFile(job.id)
+    } catch (openError) {
+      setActionError(
+        openError instanceof Error ? openError.message : 'Failed to open downloaded file',
+      )
+    } finally {
+      setActionLoading(null)
+    }
+  }
+
+  const handleOpenFolder = async (): Promise<void> => {
+    if (!job) {
+      return
+    }
+    setActionLoading('folder')
+    setActionError(undefined)
+    try {
+      await openDownloadFolder(job.id)
+    } catch (openError) {
+      setActionError(
+        openError instanceof Error ? openError.message : 'Failed to open download folder',
+      )
+    } finally {
+      setActionLoading(null)
+    }
+  }
+
+  const completedAtLabel =
+    job?.completedAt === undefined ? undefined : new Date(job.completedAt).toLocaleString()
 
   const isDownloading = job !== undefined && ACTIVE_STATUSES.has(job.status)
   const controlsLocked = loading || isDownloading
@@ -264,6 +308,42 @@ export function App(): JSX.Element {
                   message={`Status: ${STATUS_LABEL[job.status]}`}
                   tone={STATUS_TONE[job.status]}
                 />
+                {job.status === 'complete' && (
+                  <div className="bg-muted/40 grid gap-2 rounded-lg border px-3 py-2">
+                    {job.filename && (
+                      <p className="text-foreground break-all text-sm font-medium">
+                        {job.filename}
+                      </p>
+                    )}
+                    {job.outputDirResolved && (
+                      <p className="text-muted-foreground break-all text-xs">
+                        Folder: {job.outputDirResolved}
+                      </p>
+                    )}
+                    {completedAtLabel && (
+                      <p className="text-muted-foreground text-xs">Completed: {completedAtLabel}</p>
+                    )}
+                    <div className="flex gap-2">
+                      <Button
+                        disabled={actionLoading !== null}
+                        onClick={() => void handleOpenFile()}
+                        size="sm"
+                        variant="outline"
+                      >
+                        {actionLoading === 'file' ? 'Opening…' : 'Open File'}
+                      </Button>
+                      <Button
+                        disabled={actionLoading !== null}
+                        onClick={() => void handleOpenFolder()}
+                        size="sm"
+                        variant="outline"
+                      >
+                        {actionLoading === 'folder' ? 'Opening…' : 'Open Folder'}
+                      </Button>
+                    </div>
+                    {actionError && <StatusMessage message={actionError} tone="error" />}
+                  </div>
+                )}
               </CardContent>
             </Card>
           </div>

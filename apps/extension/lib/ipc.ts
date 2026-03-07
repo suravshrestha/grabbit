@@ -97,3 +97,15 @@ export async function createDownloadJob(payload: DownloadRequest): Promise<JobRe
 export async function getDownloadStatus(jobId: string): Promise<DownloadJob> {
   return request<DownloadJob>(`/api/status/${encodeURIComponent(jobId)}`)
 }
+
+export async function openDownloadedFile(jobId: string): Promise<void> {
+  await request<{ status: string }>(`/api/jobs/${encodeURIComponent(jobId)}/open-file`, {
+    method: 'POST',
+  })
+}
+
+export async function openDownloadFolder(jobId: string): Promise<void> {
+  await request<{ status: string }>(`/api/jobs/${encodeURIComponent(jobId)}/open-folder`, {
+    method: 'POST',
+  })
+}

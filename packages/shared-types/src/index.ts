@@ -26,6 +26,8 @@ export interface DownloadJob {
   speed?: string
   eta?: string
   filename?: string
+  outputPath?: string
+  outputDirResolved?: string
   error?: string
   createdAt: string
   completedAt?: string
