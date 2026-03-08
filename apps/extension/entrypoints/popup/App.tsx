@@ -53,6 +53,35 @@ const STATUS_LABEL: Record<DownloadStatus, string> = {
 
 const ACTIVE_STATUSES = new Set<DownloadStatus>(['queued', 'downloading', 'merging'])
 
+function formatQueueMetadata(request: DownloadRequest): string {
+  if (request.format === 'mp4') {
+    if (request.quality) {
+      return `MP4 • ${request.quality === '4k' ? '4K' : request.quality}`
+    }
+    return 'MP4'
+  }
+
+  if (request.format === 'mp3') {
+    if (request.audioBitrateKbps) {
+      return `MP3 • ${request.audioBitrateKbps} kbps`
+    }
+    return 'MP3'
+  }
+
+  const format = request.format === 'srt' ? 'SRT' : 'VTT'
+  const lang = request.subtitleLang?.trim()
+  const source =
+    request.subtitleSource === undefined
+      ? undefined
+      : request.subtitleSource === 'manual'
+        ? 'Manual'
+        : 'Auto'
+  const parts = [format, lang, source].filter(
+    (value): value is string => value !== undefined && value.length > 0,
+  )
+  return parts.join(' • ')
+}
+
 export function App(): JSX.Element {
   const currentTab = useCurrentTab()
   const desktopHealth = useDesktopApp()
@@ -472,6 +501,9 @@ export function App(): JSX.Element {
                       {STATUS_LABEL[entry.status]}
                     </span>
                   </div>
+                  <p className="text-muted-foreground mt-1 block min-w-0 truncate text-[11px]">
+                    {formatQueueMetadata(entry.request)}
+                  </p>
                   <div className="text-muted-foreground mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] tabular-nums">
                     <span className="shrink-0">{entry.progress.toFixed(1)}%</span>
                     {ACTIVE_STATUSES.has(entry.status) && (
