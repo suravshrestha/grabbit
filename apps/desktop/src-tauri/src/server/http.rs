@@ -2,7 +2,7 @@ use crate::{
   constants::{APP_VERSION, EVENT_QUEUE_UPDATED, SERVER_HOST, SERVER_PORT},
   downloader::ytdlp::{enqueue_download, fetch_subtitle_text, get_video_info},
   models::{DownloadFormat, DownloadJob, DownloadRequest, DownloadStatus, SubtitleSource},
-  state::AppState,
+  state::{AppState, EngineState},
 };
 use axum::{
   extract::{ConnectInfo, Path, Query, State},
@@ -33,6 +33,9 @@ struct HttpContext {
 struct HealthResponse {
   status: &'static str,
   version: &'static str,
+  #[serde(rename = "engineState")]
+  engine_state: &'static str,
+  message: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -114,12 +117,24 @@ pub async fn start_http_server(app: AppHandle, state: AppState) -> Result<(), St
 }
 
 async fn health(
+  State(context): State<HttpContext>,
   ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Json<HealthResponse>, (StatusCode, String)> {
   validate_localhost(addr)?;
+  let (engine_state, message) = {
+    let value = context.state.engine_status.lock().await;
+    let state = match value.state {
+      EngineState::Ready => "ready",
+      EngineState::Repairing => "repairing",
+      EngineState::Unavailable => "unavailable",
+    };
+    (state, value.message.clone())
+  };
   Ok(Json(HealthResponse {
     status: "ok",
     version: APP_VERSION,
+    engine_state,
+    message,
   }))
 }
 

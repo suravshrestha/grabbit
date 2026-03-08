@@ -12,6 +12,7 @@ import { Separator } from '@/components/ui/separator'
 import { Skeleton } from '@/components/ui/skeleton'
 import { DownloadButton } from '@/components/DownloadButton'
 import { FormatPicker } from '@/components/FormatPicker'
+import { Mp3BitrateSelector } from '@/components/mp3-bitrate-selector'
 import { ProgressBar } from '@/components/ProgressBar'
 import { QualitySelector } from '@/components/QualitySelector'
 import { StatusMessage } from '@/components/StatusMessage'
@@ -19,7 +20,13 @@ import { SubtitleTrackSelector } from '@/components/subtitle-track-selector'
 import { useCurrentTab } from '@/hooks/useCurrentTab'
 import { useDesktopApp } from '@/hooks/useDesktopApp'
 import { useDownload } from '@/hooks/useDownload'
-import { copySubtitle, fetchVideoInfo, openDownloadFolder, openDownloadedFile } from '@/lib/ipc'
+import {
+  cancelDownloadJob,
+  copySubtitle,
+  fetchVideoInfo,
+  openDownloadFolder,
+  openDownloadedFile,
+} from '@/lib/ipc'
 import { extractVideoId } from '@/lib/youtube'
 
 function toSubtitleTrackValue(lang: string, source: 'manual' | 'auto'): string {
@@ -48,11 +55,12 @@ const ACTIVE_STATUSES = new Set<DownloadStatus>(['queued', 'downloading', 'mergi
 
 export function App(): JSX.Element {
   const currentTab = useCurrentTab()
-  const desktopRunning = useDesktopApp()
+  const desktopHealth = useDesktopApp()
   const { jobs, focusedJob, setFocusedJob, loading, error, startDownload } = useDownload()
 
   const [format, setFormat] = useState<DownloadFormat>('mp4')
   const [quality, setQuality] = useState<'720p' | '1080p' | '4k' | 'best'>('1080p')
+  const [audioBitrateKbps, setAudioBitrateKbps] = useState<128 | 192 | 256 | 320>(320)
   const [subtitleTrackValue, setSubtitleTrackValue] = useState('')
   const [videoInfo, setVideoInfo] = useState<VideoInfo>()
   const [infoError, setInfoError] = useState<string>()
@@ -64,6 +72,8 @@ export function App(): JSX.Element {
   const [copyLoading, setCopyLoading] = useState(false)
   const [copyError, setCopyError] = useState<string>()
   const [copySuccess, setCopySuccess] = useState<string>()
+  const [cancelLoadingId, setCancelLoadingId] = useState<string>()
+  const [cancelError, setCancelError] = useState<string>()
 
   const downloadOptionsRef = useRef<HTMLDivElement>(null)
   const downloadStatusRef = useRef<HTMLDivElement>(null)
@@ -78,7 +88,7 @@ export function App(): JSX.Element {
   }, [currentTab.url])
 
   useEffect(() => {
-    if (!desktopRunning || !videoId) {
+    if (!desktopHealth.reachable || desktopHealth.engineState !== 'ready' || !videoId) {
       setInfoLoading(false)
       return
     }
@@ -103,7 +113,7 @@ export function App(): JSX.Element {
     return () => {
       cancelled = true
     }
-  }, [desktopRunning, videoId])
+  }, [desktopHealth.engineState, desktopHealth.reachable, videoId])
 
   // Scroll to and flash the Download Status card when a new job starts
   useEffect(() => {
@@ -193,6 +203,11 @@ export function App(): JSX.Element {
       payload.quality = quality
     }
 
+    if (format === 'mp3') {
+      payload.audioBitrateKbps = audioBitrateKbps
+      payload.embedThumbnail = true
+    }
+
     if (subtitleMode && selectedSubtitleTrack) {
       payload.subtitleLang = selectedSubtitleTrack.lang
       payload.subtitleSource = selectedSubtitleTrack.source
@@ -265,7 +280,21 @@ export function App(): JSX.Element {
     }
   }
 
+  const handleCancelJob = async (jobId: string): Promise<void> => {
+    setCancelError(undefined)
+    setCancelLoadingId(jobId)
+    try {
+      await cancelDownloadJob(jobId)
+    } catch (cancelJobError) {
+      setCancelError(cancelJobError instanceof Error ? cancelJobError.message : 'Failed to cancel')
+    } finally {
+      setCancelLoadingId(undefined)
+    }
+  }
+
   const job = focusedJob
+  const desktopRunning = desktopHealth.reachable && desktopHealth.engineState === 'ready'
+  const desktopRepairing = desktopHealth.reachable && desktopHealth.engineState === 'repairing'
   const completedAtLabel =
     job?.completedAt === undefined ? undefined : new Date(job.completedAt).toLocaleString()
   const hasActiveJobs = jobs.some((entry) => ACTIVE_STATUSES.has(entry.status))
@@ -347,6 +376,13 @@ export function App(): JSX.Element {
               {format === 'mp4' && (
                 <QualitySelector disabled={controlsLocked} value={quality} onChange={setQuality} />
               )}
+              {format === 'mp3' && (
+                <Mp3BitrateSelector
+                  disabled={controlsLocked}
+                  value={audioBitrateKbps}
+                  onChange={setAudioBitrateKbps}
+                />
+              )}
               {subtitleMode && subtitleTracks.length > 0 && (
                 <SubtitleTrackSelector
                   disabled={controlsLocked}
@@ -397,8 +433,16 @@ export function App(): JSX.Element {
           </Card>
         </div>
 
-        {!desktopRunning && (
+        {!desktopHealth.reachable && (
           <StatusMessage message="Start the Grabbit desktop app to continue." tone="error" />
+        )}
+        {desktopRepairing && (
+          <StatusMessage
+            message={
+              desktopHealth.message ?? 'Desktop is preparing download engine. Please wait...'
+            }
+            tone="info"
+          />
         )}
         {!videoId && desktopRunning && (
           <StatusMessage message="Open a YouTube watch page, then reopen the popup." tone="error" />
@@ -465,6 +509,16 @@ export function App(): JSX.Element {
                   message={`Status: ${STATUS_LABEL[job.status]}`}
                   tone={STATUS_TONE[job.status]}
                 />
+                {ACTIVE_STATUSES.has(job.status) && (
+                  <Button
+                    disabled={cancelLoadingId === job.id}
+                    onClick={() => void handleCancelJob(job.id)}
+                    size="sm"
+                    variant="outline"
+                  >
+                    {cancelLoadingId === job.id ? 'Cancelling…' : 'Cancel'}
+                  </Button>
+                )}
                 {job.status === 'complete' && (
                   <div className="bg-muted/40 grid gap-2 rounded-lg border px-3 py-2">
                     {job.filename && (
@@ -512,6 +566,7 @@ export function App(): JSX.Element {
                     {actionError && <StatusMessage message={actionError} tone="error" />}
                   </div>
                 )}
+                {cancelError && <StatusMessage message={cancelError} tone="error" />}
               </CardContent>
             </Card>
           </div>

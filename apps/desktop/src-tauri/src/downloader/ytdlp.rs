@@ -12,6 +12,7 @@ use std::{
   time::SystemTime,
 };
 use tauri::{AppHandle, Emitter};
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_shell::{process::CommandEvent, ShellExt};
 use thiserror::Error;
 use tokio::fs;
@@ -146,7 +147,7 @@ pub async fn fetch_subtitle_text(
   let marker = Uuid::new_v4().to_string();
   let output_template = temp_dir.join(format!("{marker}.%(ext)s"));
 
-  let mut args = build_download_args(url, format, None, subtitle_lang, subtitle_source);
+  let mut args = build_download_args(url, format, None, None, true, subtitle_lang, subtitle_source);
   args.extend([
     "-o".to_string(),
     output_template.to_string_lossy().to_string(),
@@ -469,6 +470,8 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
     &request.url,
     &request.format,
     request.quality.as_deref(),
+    request.audio_bitrate_kbps,
+    request.embed_thumbnail.unwrap_or(true),
     request.subtitle_lang.as_deref(),
     request.subtitle_source.as_ref(),
   );
@@ -546,6 +549,7 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
       job.clone()
     };
     let _ = app.emit(EVENT_DOWNLOAD_COMPLETE, &completed);
+    send_terminal_notification(&app, &completed, None);
   } else {
     let error_message = final_error_line.unwrap_or_else(|| "yt-dlp failed".to_string());
     let failed = {
@@ -557,6 +561,7 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
       job.clone()
     };
     let _ = app.emit(EVENT_DOWNLOAD_ERROR, &failed);
+    send_terminal_notification(&app, &failed, failed.error.as_deref());
   }
 
   Ok(())
@@ -763,6 +768,8 @@ fn build_download_args(
   url: &str,
   format: &DownloadFormat,
   quality: Option<&str>,
+  audio_bitrate_kbps: Option<u16>,
+  embed_thumbnail: bool,
   subtitle_lang: Option<&str>,
   subtitle_source: Option<&SubtitleSource>,
 ) -> Vec<String> {
@@ -784,13 +791,17 @@ fn build_download_args(
       ]);
     }
     DownloadFormat::Mp3 => {
+      let bitrate = audio_bitrate_kbps.unwrap_or(320);
       args.extend([
         "-x".to_string(),
         "--audio-format".to_string(),
         "mp3".to_string(),
         "--audio-quality".to_string(),
-        "0".to_string(),
+        format!("{bitrate}K"),
       ]);
+      if embed_thumbnail {
+        args.push("--embed-thumbnail".to_string());
+      }
     }
     DownloadFormat::Srt | DownloadFormat::Vtt => {
       let lang = subtitle_lang.unwrap_or("en");
@@ -809,6 +820,29 @@ fn build_download_args(
     }
   }
   args
+}
+
+fn send_terminal_notification(app: &AppHandle, job: &crate::models::DownloadJob, error: Option<&str>) {
+  let title = if error.is_some() {
+    "Grabbit download failed"
+  } else {
+    "Grabbit download complete"
+  };
+  let body = if let Some(message) = error {
+    message.to_string()
+  } else {
+    job
+      .filename
+      .clone()
+      .unwrap_or_else(|| "Your file is ready.".to_string())
+  };
+
+  let _ = app
+    .notification()
+    .builder()
+    .title(title)
+    .body(body)
+    .show();
 }
 
 fn map_video_info(video_id: &str, payload: &Value) -> VideoInfo {
@@ -1073,6 +1107,8 @@ mod tests {
       "https://example.com/video",
       &DownloadFormat::Srt,
       None,
+      None,
+      true,
       Some("en"),
       Some(&SubtitleSource::Manual),
     );
@@ -1089,6 +1125,8 @@ mod tests {
       "https://example.com/video",
       &DownloadFormat::Vtt,
       None,
+      None,
+      true,
       Some("en"),
       Some(&SubtitleSource::Auto),
     );
@@ -1097,6 +1135,23 @@ mod tests {
     assert!(args.contains(&"--no-write-subs".to_string()));
     assert!(!args.contains(&"--write-subs".to_string()));
     assert!(args.contains(&"vtt".to_string()));
+  }
+
+  #[test]
+  fn build_download_args_uses_selected_mp3_bitrate_and_thumbnail_embedding() {
+    let args = build_download_args(
+      "https://example.com/video",
+      &DownloadFormat::Mp3,
+      None,
+      Some(192),
+      true,
+      None,
+      None,
+    );
+
+    assert!(args.contains(&"--audio-quality".to_string()));
+    assert!(args.contains(&"192K".to_string()));
+    assert!(args.contains(&"--embed-thumbnail".to_string()));
   }
 
   #[test]

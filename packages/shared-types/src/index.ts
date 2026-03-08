@@ -14,6 +14,8 @@ export interface DownloadRequest {
   url: string
   format: DownloadFormat
   quality?: '360p' | '720p' | '1080p' | '4k' | 'best'
+  audioBitrateKbps?: 128 | 192 | 256 | 320
+  embedThumbnail?: boolean
   subtitleLang?: string
   subtitleSource?: 'manual' | 'auto'
   outputDir?: string
@@ -38,6 +40,12 @@ export interface DesktopAppInfo {
   version: string
   ytdlpVersion: string
   status: 'ready' | 'busy'
+}
+
+export interface DesktopHealth {
+  reachable: boolean
+  engineState: 'ready' | 'repairing' | 'unavailable'
+  message?: string
 }
 
 export interface VideoInfo {

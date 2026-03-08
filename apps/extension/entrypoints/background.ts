@@ -10,8 +10,8 @@ interface ExtensionMessage {
 chrome.runtime.onMessage.addListener(
   (message: ExtensionMessage, _sender: chrome.runtime.MessageSender, sendResponse): boolean => {
     if (message.type === MESSAGE_TYPES.CHECK_DESKTOP_APP) {
-      void checkDesktopHealth().then((isRunning) => {
-        sendResponse({ isRunning })
+      void checkDesktopHealth().then((health) => {
+        sendResponse({ isRunning: health.reachable && health.engineState === 'ready', health })
       })
       return true
     }

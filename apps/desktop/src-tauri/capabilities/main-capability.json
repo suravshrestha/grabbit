@@ -3,5 +3,11 @@
   "identifier": "main-capability",
   "description": "Default capabilities for Grabbit desktop app",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default", "shell:allow-execute", "shell:allow-open"]
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "notification:default",
+    "shell:allow-execute",
+    "shell:allow-open"
+  ]
 }
