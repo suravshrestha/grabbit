@@ -300,14 +300,16 @@ fn normalize_subtitle_text(raw: &str, format: &DownloadFormat) -> String {
 }
 
 fn normalize_srt_text(raw: &str) -> String {
+  let source_lines: Vec<&str> = raw.lines().collect();
   let mut lines = Vec::new();
-  for line in raw.lines() {
+  for (index, line) in source_lines.iter().enumerate() {
     let trimmed = line.trim();
+    let next_trimmed = source_lines.get(index + 1).map(|value| value.trim());
     if trimmed.is_empty() {
       lines.push(String::new());
       continue;
     }
-    if trimmed.chars().all(|char| char.is_ascii_digit()) {
+    if is_numeric_cue_identifier(trimmed, next_trimmed) {
       continue;
     }
     if trimmed.contains("-->") {
@@ -322,12 +324,14 @@ fn normalize_srt_text(raw: &str) -> String {
 }
 
 fn normalize_vtt_text(raw: &str) -> String {
+  let source_lines: Vec<&str> = raw.lines().collect();
   let mut lines = Vec::new();
   let mut in_note_block = false;
   let mut in_metadata_block = false;
 
-  for line in raw.lines() {
+  for (index, line) in source_lines.iter().enumerate() {
     let trimmed = line.trim();
+    let next_trimmed = source_lines.get(index + 1).map(|value| value.trim());
     if trimmed.is_empty() {
       lines.push(String::new());
       in_note_block = false;
@@ -353,7 +357,7 @@ fn normalize_vtt_text(raw: &str) -> String {
     if trimmed.contains("-->") {
       continue;
     }
-    if trimmed.chars().all(|char| char.is_ascii_digit()) {
+    if is_numeric_cue_identifier(trimmed, next_trimmed) {
       continue;
     }
 
@@ -364,6 +368,11 @@ fn normalize_vtt_text(raw: &str) -> String {
   }
 
   lines.join("\n")
+}
+
+fn is_numeric_cue_identifier(line: &str, next_line: Option<&str>) -> bool {
+  line.chars().all(|char| char.is_ascii_digit())
+    && next_line.is_some_and(|candidate| candidate.contains("-->"))
 }
 
 fn strip_subtitle_tags(input: &str) -> String {
@@ -1228,5 +1237,31 @@ World
 "#;
     let output = normalize_subtitle_text(input, &DownloadFormat::Vtt);
     assert_eq!(output, "Hello\nWorld");
+  }
+
+  #[test]
+  fn normalize_subtitle_text_preserves_numeric_srt_dialogue() {
+    let input = r#"1
+00:00:01,000 --> 00:00:03,000
+2024
+911
+"#;
+    let output = normalize_subtitle_text(input, &DownloadFormat::Srt);
+    assert_eq!(output, "2024\n911");
+  }
+
+  #[test]
+  fn normalize_subtitle_text_preserves_numeric_vtt_dialogue() {
+    let input = r#"WEBVTT
+
+00:00:01.000 --> 00:00:02.000
+10
+
+2
+00:00:03.000 --> 00:00:04.000
+20
+"#;
+    let output = normalize_subtitle_text(input, &DownloadFormat::Vtt);
+    assert_eq!(output, "10\n20");
   }
 }
