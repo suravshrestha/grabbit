@@ -1,5 +1,10 @@
-use crate::{constants::EVENT_QUEUE_UPDATED, state::AppState};
+use crate::{
+  constants::EVENT_QUEUE_UPDATED,
+  downloader::ytdlp::cleanup_cancelled_download_artifacts,
+  state::AppState,
+};
 use tauri::{AppHandle, Emitter, State};
+use tracing::warn;
 use uuid::Uuid;
 
 #[tauri::command]
@@ -26,6 +31,11 @@ pub async fn cancel_job(app: AppHandle, state: State<'_, AppState>, job_id: Stri
     job.completed_at = Some(chrono::Utc::now().to_rfc3339());
     job.clone()
   };
+
+  if let Err(err) = cleanup_cancelled_download_artifacts(state.inner(), id).await {
+    warn!("failed to clean cancelled artifacts for job {id}: {err}");
+  }
+
   let _ = app.emit(EVENT_QUEUE_UPDATED, &cancelled);
   Ok(())
 }

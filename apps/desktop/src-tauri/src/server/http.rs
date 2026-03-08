@@ -1,6 +1,8 @@
 use crate::{
   constants::{APP_VERSION, EVENT_QUEUE_UPDATED, SERVER_HOST, SERVER_PORT},
-  downloader::ytdlp::{enqueue_download, fetch_subtitle_text, get_video_info},
+  downloader::ytdlp::{
+    cleanup_cancelled_download_artifacts, enqueue_download, fetch_subtitle_text, get_video_info,
+  },
   models::{DownloadFormat, DownloadJob, DownloadRequest, DownloadStatus, SubtitleSource},
   state::{AppState, EngineState},
 };
@@ -20,6 +22,7 @@ use std::{
   process::Command,
 };
 use tauri::{AppHandle, Emitter};
+use tracing::warn;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
@@ -274,6 +277,9 @@ async fn cancel(
     }
   };
   if let Some(job) = cancelled {
+    if let Err(err) = cleanup_cancelled_download_artifacts(&context.state, id).await {
+      warn!("failed to clean cancelled artifacts for job {id}: {err}");
+    }
     let _ = context.app.emit(EVENT_QUEUE_UPDATED, &job);
   }
 

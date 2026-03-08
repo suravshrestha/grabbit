@@ -8,6 +8,7 @@ use crate::{
 use chrono::Utc;
 use serde_json::Value;
 use std::{
+  io::ErrorKind,
   path::{Path, PathBuf},
   time::SystemTime,
 };
@@ -16,7 +17,7 @@ use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_shell::{process::CommandEvent, ShellExt};
 use thiserror::Error;
 use tokio::fs;
-use tracing::error;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 struct AttemptResult {
@@ -642,6 +643,9 @@ async fn run_ytdlp_attempt(
           error!("failed to kill process after cancellation: {err}");
         }
       }
+      if let Err(err) = cleanup_cancelled_download_artifacts(state, job_id).await {
+        warn!("failed to clean up cancelled download artifacts: {err}");
+      }
       cancelled = true;
       break;
     }
@@ -798,6 +802,59 @@ fn normalize_output_path(raw: &str) -> Option<String> {
     return None;
   }
   Some(trimmed.to_string())
+}
+
+pub async fn cleanup_cancelled_download_artifacts(
+  state: &AppState,
+  job_id: uuid::Uuid,
+) -> Result<(), String> {
+  let job = {
+    let jobs = state.jobs.lock().await;
+    jobs
+      .get(&job_id)
+      .cloned()
+      .ok_or_else(|| "job not found".to_string())?
+  };
+
+  if !matches!(job.status, DownloadStatus::Cancelled) {
+    return Ok(());
+  }
+
+  let Some(output_path) = job.output_path else {
+    return Ok(());
+  };
+
+  for artifact_path in cancellation_artifact_candidates(Path::new(&output_path)) {
+    if let Err(error) = fs::remove_file(&artifact_path).await {
+      if error.kind() != ErrorKind::NotFound {
+        warn!(
+          "failed to remove cancelled artifact '{}': {error}",
+          artifact_path.display()
+        );
+      }
+    }
+  }
+
+  Ok(())
+}
+
+fn cancellation_artifact_candidates(output_path: &Path) -> Vec<PathBuf> {
+  let mut candidates = vec![
+    PathBuf::from(format!("{}.part", output_path.to_string_lossy())),
+    PathBuf::from(format!("{}.ytdl", output_path.to_string_lossy())),
+  ];
+
+  if output_path
+    .extension()
+    .and_then(|value| value.to_str())
+    .is_some_and(|value| value.eq_ignore_ascii_case("part") || value.eq_ignore_ascii_case("ytdl"))
+  {
+    candidates.push(output_path.to_path_buf());
+  }
+
+  candidates.sort();
+  candidates.dedup();
+  candidates
 }
 
 fn is_auth_error_line(line: &str) -> bool {
@@ -1110,13 +1167,14 @@ async fn is_job_cancelled(state: &AppState, job_id: uuid::Uuid) -> Result<bool, 
 #[cfg(test)]
 mod tests {
   use super::{
-    AttemptResult, build_download_args, build_relaxed_mp4_args, expand_tilde_path,
-    extract_output_path_line, is_auth_error_line, is_format_unavailable_line, map_video_info,
-    normalize_subtitle_text, parse_subtitle_tracks, resolve_output_dir_from,
-    should_retry_with_browser_cookies,
+    AttemptResult, build_download_args, build_relaxed_mp4_args,
+    cancellation_artifact_candidates, expand_tilde_path, extract_output_path_line,
+    is_auth_error_line, is_format_unavailable_line, map_video_info, normalize_subtitle_text,
+    parse_subtitle_tracks, resolve_output_dir_from, should_retry_with_browser_cookies,
   };
   use crate::models::{DownloadFormat, SubtitleSource};
   use serde_json::json;
+  use std::path::{Path, PathBuf};
 
   #[test]
   fn parse_subtitle_tracks_collects_manual_and_auto_sorted() {
@@ -1313,6 +1371,14 @@ mod tests {
   fn build_relaxed_mp4_args_uses_best_effort_selector() {
     let args = build_relaxed_mp4_args("https://example.com/video");
     assert!(args.contains(&"bv*+ba/best".to_string()));
+  }
+
+  #[test]
+  fn cancellation_artifact_candidates_include_part_and_ytdl() {
+    let output_path = Path::new("/tmp/demo.f399.mp4");
+    let candidates = cancellation_artifact_candidates(output_path);
+    assert!(candidates.contains(&PathBuf::from("/tmp/demo.f399.mp4.part")));
+    assert!(candidates.contains(&PathBuf::from("/tmp/demo.f399.mp4.ytdl")));
   }
 
   #[test]
