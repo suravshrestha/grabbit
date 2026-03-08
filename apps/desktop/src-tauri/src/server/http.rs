@@ -1,7 +1,7 @@
 use crate::{
   constants::{APP_VERSION, EVENT_QUEUE_UPDATED, SERVER_HOST, SERVER_PORT},
-  downloader::ytdlp::{enqueue_download, get_video_info},
-  models::{DownloadJob, DownloadRequest, DownloadStatus},
+  downloader::ytdlp::{enqueue_download, fetch_subtitle_text, get_video_info},
+  models::{DownloadFormat, DownloadJob, DownloadRequest, DownloadStatus, SubtitleSource},
   state::AppState,
 };
 use axum::{
@@ -46,6 +46,22 @@ struct ActionResponse {
   status: &'static str,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CopySubtitleResponse {
+  text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CopySubtitleRequest {
+  video_id: String,
+  url: String,
+  format: DownloadFormat,
+  subtitle_lang: String,
+  subtitle_source: SubtitleSource,
+}
+
 #[derive(Deserialize)]
 struct InfoQuery {
   #[serde(rename = "videoId")]
@@ -77,6 +93,7 @@ pub async fn start_http_server(app: AppHandle, state: AppState) -> Result<(), St
     .route("/api/health", get(health))
     .route("/api/info", get(info))
     .route("/api/download", post(download))
+    .route("/api/subtitles/copy", post(copy_subtitle))
     .route("/api/queue", get(queue))
     .route("/api/status/:job_id", get(status))
     .route("/api/jobs/:job_id/open-file", post(open_file))
@@ -188,6 +205,39 @@ async fn queue(
     .filter_map(|id| jobs.get(id).cloned())
     .collect::<Vec<DownloadJob>>();
   Ok(Json(queue))
+}
+
+async fn copy_subtitle(
+  State(context): State<HttpContext>,
+  ConnectInfo(addr): ConnectInfo<SocketAddr>,
+  Json(payload): Json<CopySubtitleRequest>,
+) -> Result<Json<CopySubtitleResponse>, (StatusCode, String)> {
+  validate_localhost(addr)?;
+
+  if payload.video_id.trim().is_empty() {
+    return Err((StatusCode::BAD_REQUEST, "videoId is required".to_string()));
+  }
+  if payload.url.trim().is_empty() {
+    return Err((StatusCode::BAD_REQUEST, "url is required".to_string()));
+  }
+  if !matches!(payload.format, DownloadFormat::Srt | DownloadFormat::Vtt) {
+    return Err((StatusCode::BAD_REQUEST, "format must be srt or vtt".to_string()));
+  }
+  if payload.subtitle_lang.trim().is_empty() {
+    return Err((StatusCode::BAD_REQUEST, "subtitleLang is required".to_string()));
+  }
+
+  let text = fetch_subtitle_text(
+    &context.app,
+    &payload.url,
+    &payload.format,
+    Some(payload.subtitle_lang.as_str()),
+    Some(&payload.subtitle_source),
+  )
+  .await
+  .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+
+  Ok(Json(CopySubtitleResponse { text }))
 }
 
 async fn cancel(

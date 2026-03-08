@@ -19,7 +19,7 @@ import { SubtitleTrackSelector } from '@/components/subtitle-track-selector'
 import { useCurrentTab } from '@/hooks/useCurrentTab'
 import { useDesktopApp } from '@/hooks/useDesktopApp'
 import { useDownload } from '@/hooks/useDownload'
-import { fetchVideoInfo, openDownloadFolder, openDownloadedFile } from '@/lib/ipc'
+import { copySubtitle, fetchVideoInfo, openDownloadFolder, openDownloadedFile } from '@/lib/ipc'
 import { extractVideoId } from '@/lib/youtube'
 
 function toSubtitleTrackValue(lang: string, source: 'manual' | 'auto'): string {
@@ -58,9 +58,14 @@ export function App(): JSX.Element {
   const [infoError, setInfoError] = useState<string>()
   const [infoLoading, setInfoLoading] = useState(false)
   const [statusFlash, setStatusFlash] = useState(false)
+  const [copyFlash, setCopyFlash] = useState(false)
   const [actionLoading, setActionLoading] = useState<'file' | 'folder' | null>(null)
   const [actionError, setActionError] = useState<string>()
+  const [copyLoading, setCopyLoading] = useState(false)
+  const [copyError, setCopyError] = useState<string>()
+  const [copySuccess, setCopySuccess] = useState<string>()
 
+  const downloadOptionsRef = useRef<HTMLDivElement>(null)
   const downloadStatusRef = useRef<HTMLDivElement>(null)
   const prevJobIdRef = useRef<string | undefined>(undefined)
 
@@ -149,6 +154,25 @@ export function App(): JSX.Element {
     }
   }, [selectedSubtitleTrack, subtitleMode, subtitleTracks])
 
+  useEffect(() => {
+    setCopyError(undefined)
+    setCopySuccess(undefined)
+  }, [subtitleMode, subtitleTrackValue, videoId])
+
+  useEffect(() => {
+    if (!copySuccess) {
+      setCopyFlash(false)
+      return
+    }
+
+    downloadOptionsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    setCopyFlash(true)
+    const flashTimer = window.setTimeout(() => setCopyFlash(false), 900)
+    return () => {
+      window.clearTimeout(flashTimer)
+    }
+  }, [copySuccess])
+
   const handleDownload = async (): Promise<void> => {
     if (!videoId || !currentTab.url) {
       return
@@ -213,6 +237,34 @@ export function App(): JSX.Element {
     }
   }
 
+  const handleCopySubtitle = async (): Promise<void> => {
+    if (!videoId || !currentTab.url || !selectedSubtitleTrack || !subtitleMode) {
+      return
+    }
+
+    setCopyLoading(true)
+    setCopyError(undefined)
+    setCopySuccess(undefined)
+
+    try {
+      const { text } = await copySubtitle({
+        videoId,
+        url: currentTab.url,
+        format: format === 'srt' ? 'srt' : 'vtt',
+        subtitleLang: selectedSubtitleTrack.lang,
+        subtitleSource: selectedSubtitleTrack.source,
+      })
+      await navigator.clipboard.writeText(text)
+      setCopySuccess('Subtitle copied to clipboard.')
+    } catch (copySubtitleError) {
+      setCopyError(
+        copySubtitleError instanceof Error ? copySubtitleError.message : 'Failed to copy subtitle',
+      )
+    } finally {
+      setCopyLoading(false)
+    }
+  }
+
   const job = focusedJob
   const completedAtLabel =
     job?.completedAt === undefined ? undefined : new Date(job.completedAt).toLocaleString()
@@ -220,6 +272,13 @@ export function App(): JSX.Element {
   const isDownloading = job !== undefined && ACTIVE_STATUSES.has(job.status)
   const controlsLocked = loading
   const canDownload = desktopRunning && !!videoId && (!subtitleMode || !!selectedSubtitleTrack)
+  const canCopySubtitle =
+    desktopRunning &&
+    !!videoId &&
+    !!currentTab.url &&
+    subtitleMode &&
+    !!selectedSubtitleTrack &&
+    !copyLoading
   const hasDuplicateActiveForCurrentVideo =
     videoId !== null &&
     jobs.some((entry) => entry.request.videoId === videoId && ACTIVE_STATUSES.has(entry.status))
@@ -276,36 +335,67 @@ export function App(): JSX.Element {
           </CardContent>
         </Card>
 
-        <Card className="gap-3 py-4">
-          <CardHeader className="px-4">
-            <CardTitle className="text-sm">Download Options</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-3 px-4">
-            <FormatPicker disabled={controlsLocked} value={format} onChange={setFormat} />
-            {format === 'mp4' && (
-              <QualitySelector disabled={controlsLocked} value={quality} onChange={setQuality} />
-            )}
-            {subtitleMode && subtitleTracks.length > 0 && (
-              <SubtitleTrackSelector
-                disabled={controlsLocked}
-                tracks={subtitleTracks}
-                value={subtitleTrackValue}
-                onChange={setSubtitleTrackValue}
-              />
-            )}
-            {subtitleMode && subtitleTracks.length === 0 && (
-              <StatusMessage message="No subtitle tracks available for this video." tone="error" />
-            )}
-            <Separator className="my-1" />
-            <DownloadButton
-              disabled={!canDownload || controlsLocked || hasDuplicateActiveForCurrentVideo}
-              loading={loading}
-              idleLabel={downloadActionLabel}
-              loadingLabel="Adding to Queue..."
-              onClick={() => void handleDownload()}
-            />
-          </CardContent>
-        </Card>
+        <div ref={downloadOptionsRef}>
+          <Card
+            className={`gap-3 py-4 transition-colors ${copyFlash ? 'bg-primary/5 ring-primary/40 ring-2 ring-inset' : ''}`}
+          >
+            <CardHeader className="px-4">
+              <CardTitle className="text-sm">Download Options</CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-3 px-4">
+              <FormatPicker disabled={controlsLocked} value={format} onChange={setFormat} />
+              {format === 'mp4' && (
+                <QualitySelector disabled={controlsLocked} value={quality} onChange={setQuality} />
+              )}
+              {subtitleMode && subtitleTracks.length > 0 && (
+                <SubtitleTrackSelector
+                  disabled={controlsLocked}
+                  tracks={subtitleTracks}
+                  value={subtitleTrackValue}
+                  onChange={setSubtitleTrackValue}
+                />
+              )}
+              {subtitleMode && subtitleTracks.length === 0 && (
+                <StatusMessage
+                  message="No subtitle tracks available for this video."
+                  tone="error"
+                />
+              )}
+              <Separator className="my-1" />
+              {subtitleMode ? (
+                <div className="grid grid-cols-2 gap-2">
+                  <Button
+                    disabled={!canCopySubtitle || controlsLocked}
+                    onClick={() => void handleCopySubtitle()}
+                    size="lg"
+                    variant="outline"
+                  >
+                    {copyLoading ? 'Copying...' : 'Copy Subtitle'}
+                  </Button>
+                  <DownloadButton
+                    disabled={!canDownload || controlsLocked || hasDuplicateActiveForCurrentVideo}
+                    loading={loading}
+                    idleLabel={downloadActionLabel}
+                    loadingLabel="Adding to Queue..."
+                    onClick={() => void handleDownload()}
+                  />
+                </div>
+              ) : (
+                <DownloadButton
+                  disabled={!canDownload || controlsLocked || hasDuplicateActiveForCurrentVideo}
+                  loading={loading}
+                  idleLabel={downloadActionLabel}
+                  loadingLabel="Adding to Queue..."
+                  onClick={() => void handleDownload()}
+                />
+              )}
+              {copySuccess && subtitleMode && (
+                <StatusMessage message={copySuccess} tone="success" />
+              )}
+              {copyError && subtitleMode && <StatusMessage message={copyError} tone="error" />}
+            </CardContent>
+          </Card>
+        </div>
 
         {!desktopRunning && (
           <StatusMessage message="Start the Grabbit desktop app to continue." tone="error" />

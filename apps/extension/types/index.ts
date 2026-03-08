@@ -1,4 +1,10 @@
-import type { DownloadJob, DownloadRequest, VideoInfo } from '@grabbit/shared-types'
+import type {
+  CopySubtitleRequest,
+  CopySubtitleResponse,
+  DownloadJob,
+  DownloadRequest,
+  VideoInfo,
+} from '@grabbit/shared-types'
 
 export type MessageType = 'CHECK_DESKTOP_APP' | 'GET_VIDEO_INFO' | 'CONTENT_VIDEO_METADATA'
 
@@ -15,4 +21,4 @@ export interface HealthResponse {
   version: string
 }
 
-export type { DownloadJob, DownloadRequest, VideoInfo }
+export type { CopySubtitleRequest, CopySubtitleResponse, DownloadJob, DownloadRequest, VideoInfo }

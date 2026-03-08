@@ -53,3 +53,15 @@ export interface SubtitleTrack {
   name: string
   source: 'manual' | 'auto'
 }
+
+export interface CopySubtitleRequest {
+  videoId: string
+  url: string
+  format: 'srt' | 'vtt'
+  subtitleLang: string
+  subtitleSource: 'manual' | 'auto'
+}
+
+export interface CopySubtitleResponse {
+  text: string
+}

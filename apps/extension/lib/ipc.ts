@@ -1,4 +1,10 @@
-import type { DownloadJob, DownloadRequest, VideoInfo } from '@/types'
+import type {
+  CopySubtitleRequest,
+  CopySubtitleResponse,
+  DownloadJob,
+  DownloadRequest,
+  VideoInfo,
+} from '@/types'
 import { IPC_BASE_URL } from '@/lib/constants'
 
 interface JobResponse {
@@ -111,5 +117,12 @@ export async function openDownloadedFile(jobId: string): Promise<void> {
 export async function openDownloadFolder(jobId: string): Promise<void> {
   await request<{ status: string }>(`/api/jobs/${encodeURIComponent(jobId)}/open-folder`, {
     method: 'POST',
+  })
+}
+
+export async function copySubtitle(payload: CopySubtitleRequest): Promise<CopySubtitleResponse> {
+  return request<CopySubtitleResponse>('/api/subtitles/copy', {
+    method: 'POST',
+    body: JSON.stringify(payload),
   })
 }

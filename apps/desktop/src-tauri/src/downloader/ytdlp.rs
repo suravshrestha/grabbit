@@ -7,11 +7,16 @@ use crate::{
 };
 use chrono::Utc;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::{
+  path::{Path, PathBuf},
+  time::SystemTime,
+};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_shell::{process::CommandEvent, ShellExt};
 use thiserror::Error;
+use tokio::fs;
 use tracing::error;
+use uuid::Uuid;
 
 struct AttemptResult {
   success: bool,
@@ -119,6 +124,295 @@ pub async fn get_video_info(app: &AppHandle, video_id: &str) -> Result<VideoInfo
   let payload: Value = serde_json::from_slice(&output.stdout)
     .map_err(|error| DownloaderError::Serialization(error.to_string()))?;
   Ok(map_video_info(video_id, &payload))
+}
+
+pub async fn fetch_subtitle_text(
+  app: &AppHandle,
+  url: &str,
+  format: &DownloadFormat,
+  subtitle_lang: Option<&str>,
+  subtitle_source: Option<&SubtitleSource>,
+) -> Result<String, String> {
+  if !matches!(format, DownloadFormat::Srt | DownloadFormat::Vtt) {
+    return Err("Subtitle copy supports only srt and vtt formats".to_string());
+  }
+
+  let ytdlp = resolve_binary_path(app, yt_dlp_binary_name()).map_err(DownloaderError::Resource)?;
+  let temp_dir = std::env::temp_dir().join("grabbit-subtitles");
+  fs::create_dir_all(&temp_dir)
+    .await
+    .map_err(|error| format!("Failed to create temp subtitle directory: {error}"))?;
+
+  let marker = Uuid::new_v4().to_string();
+  let output_template = temp_dir.join(format!("{marker}.%(ext)s"));
+
+  let mut args = build_download_args(url, format, None, subtitle_lang, subtitle_source);
+  args.extend([
+    "-o".to_string(),
+    output_template.to_string_lossy().to_string(),
+    "--newline".to_string(),
+  ]);
+
+  let first_attempt = run_subtitle_fetch_attempt(app, &ytdlp, args.clone()).await?;
+  let mut success = first_attempt.success;
+  let mut final_error_line = first_attempt.last_error_line.clone();
+
+  if should_retry_with_browser_cookies(&first_attempt) {
+    let mut cookie_args = args;
+    cookie_args.extend(["--cookies-from-browser".to_string(), "chrome".to_string()]);
+    let retry_attempt = run_subtitle_fetch_attempt(app, &ytdlp, cookie_args).await?;
+    success = retry_attempt.success;
+    final_error_line = retry_attempt.last_error_line.or(final_error_line);
+  }
+
+  if !success {
+    cleanup_temp_subtitle_files(&temp_dir, &marker).await;
+    return Err(final_error_line.unwrap_or_else(|| "yt-dlp failed to fetch subtitles".to_string()));
+  }
+
+  let subtitle_file = find_subtitle_file(&temp_dir, &marker, format)
+    .await?
+    .ok_or_else(|| "Subtitle file was not produced by yt-dlp".to_string())?;
+  let raw_text = fs::read_to_string(&subtitle_file)
+    .await
+    .map_err(|error| format!("Failed to read subtitle file: {error}"))?;
+
+  cleanup_temp_subtitle_files(&temp_dir, &marker).await;
+
+  let plain_text = normalize_subtitle_text(&raw_text, format);
+  if plain_text.is_empty() {
+    return Err("Subtitle file did not contain readable text".to_string());
+  }
+
+  Ok(plain_text)
+}
+
+async fn run_subtitle_fetch_attempt(
+  app: &AppHandle,
+  ytdlp: &Path,
+  args: Vec<String>,
+) -> Result<AttemptResult, String> {
+  let output = app
+    .shell()
+    .command(ytdlp.to_string_lossy().to_string())
+    .args(args)
+    .output()
+    .await
+    .map_err(|error| DownloaderError::Process(error.to_string()).to_string())?;
+
+  let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+  let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+  let combined = [stdout.as_str(), stderr.as_str()].join("\n");
+  let mut last_error_line = None;
+  let mut auth_error_detected = false;
+  for line in combined.lines() {
+    if is_auth_error_line(line) {
+      auth_error_detected = true;
+    }
+    if let Some(error_line) = extract_error_line(line) {
+      last_error_line = Some(error_line);
+    }
+  }
+
+  Ok(AttemptResult {
+    success: output.status.code() == Some(0),
+    cancelled: false,
+    last_error_line,
+    auth_error_detected,
+  })
+}
+
+async fn find_subtitle_file(
+  temp_dir: &Path,
+  marker: &str,
+  format: &DownloadFormat,
+) -> Result<Option<PathBuf>, String> {
+  let ext = match format {
+    DownloadFormat::Srt => "srt",
+    DownloadFormat::Vtt => "vtt",
+    _ => return Ok(None),
+  };
+
+  let mut latest: Option<(SystemTime, PathBuf)> = None;
+  let mut entries = fs::read_dir(temp_dir)
+    .await
+    .map_err(|error| format!("Failed to read temp directory: {error}"))?;
+
+  while let Some(entry) = entries
+    .next_entry()
+    .await
+    .map_err(|error| format!("Failed to read temp directory entry: {error}"))?
+  {
+    let path = entry.path();
+    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+      continue;
+    };
+    if !file_name.starts_with(marker) || !file_name.ends_with(ext) {
+      continue;
+    }
+
+    let metadata = entry
+      .metadata()
+      .await
+      .map_err(|error| format!("Failed to read subtitle file metadata: {error}"))?;
+    let modified_at = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+
+    match &latest {
+      Some((current_modified, _)) if modified_at <= *current_modified => {}
+      _ => {
+        latest = Some((modified_at, path));
+      }
+    }
+  }
+
+  Ok(latest.map(|(_, path)| path))
+}
+
+async fn cleanup_temp_subtitle_files(temp_dir: &Path, marker: &str) {
+  let mut entries = match fs::read_dir(temp_dir).await {
+    Ok(entries) => entries,
+    Err(_) => return,
+  };
+
+  loop {
+    let next = entries.next_entry().await;
+    let Ok(Some(entry)) = next else {
+      break;
+    };
+    let path = entry.path();
+    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+      continue;
+    };
+    if !file_name.starts_with(marker) {
+      continue;
+    }
+    let _ = fs::remove_file(path).await;
+  }
+}
+
+fn normalize_subtitle_text(raw: &str, format: &DownloadFormat) -> String {
+  let text = match format {
+    DownloadFormat::Srt => normalize_srt_text(raw),
+    DownloadFormat::Vtt => normalize_vtt_text(raw),
+    _ => String::new(),
+  };
+  collapse_blank_lines(&text).trim().to_string()
+}
+
+fn normalize_srt_text(raw: &str) -> String {
+  let source_lines: Vec<&str> = raw.lines().collect();
+  let mut lines = Vec::new();
+  for (index, line) in source_lines.iter().enumerate() {
+    let trimmed = line.trim();
+    let next_trimmed = source_lines.get(index + 1).map(|value| value.trim());
+    if trimmed.is_empty() {
+      lines.push(String::new());
+      continue;
+    }
+    if is_numeric_cue_identifier(trimmed, next_trimmed) {
+      continue;
+    }
+    if trimmed.contains("-->") {
+      continue;
+    }
+    let text_line = strip_subtitle_tags(trimmed);
+    if !text_line.is_empty() {
+      lines.push(text_line);
+    }
+  }
+  lines.join("\n")
+}
+
+fn normalize_vtt_text(raw: &str) -> String {
+  let source_lines: Vec<&str> = raw.lines().collect();
+  let mut lines = Vec::new();
+  let mut in_note_block = false;
+  let mut in_metadata_block = false;
+
+  for (index, line) in source_lines.iter().enumerate() {
+    let trimmed = line.trim();
+    let next_trimmed = source_lines.get(index + 1).map(|value| value.trim());
+    if trimmed.is_empty() {
+      lines.push(String::new());
+      in_note_block = false;
+      in_metadata_block = false;
+      continue;
+    }
+
+    if in_note_block || in_metadata_block {
+      continue;
+    }
+
+    if trimmed.eq_ignore_ascii_case("WEBVTT") {
+      continue;
+    }
+    if trimmed.starts_with("NOTE") {
+      in_note_block = true;
+      continue;
+    }
+    if trimmed == "STYLE" || trimmed == "REGION" {
+      in_metadata_block = true;
+      continue;
+    }
+    if trimmed.contains("-->") {
+      continue;
+    }
+    if is_numeric_cue_identifier(trimmed, next_trimmed) {
+      continue;
+    }
+
+    let text_line = strip_subtitle_tags(trimmed);
+    if !text_line.is_empty() {
+      lines.push(text_line);
+    }
+  }
+
+  lines.join("\n")
+}
+
+fn is_numeric_cue_identifier(line: &str, next_line: Option<&str>) -> bool {
+  line.chars().all(|char| char.is_ascii_digit())
+    && next_line.is_some_and(|candidate| candidate.contains("-->"))
+}
+
+fn strip_subtitle_tags(input: &str) -> String {
+  let mut output = String::with_capacity(input.len());
+  let mut in_tag = false;
+  for char in input.chars() {
+    if char == '<' {
+      in_tag = true;
+      continue;
+    }
+    if char == '>' {
+      in_tag = false;
+      continue;
+    }
+    if !in_tag {
+      output.push(char);
+    }
+  }
+  output.trim().to_string()
+}
+
+fn collapse_blank_lines(input: &str) -> String {
+  let mut collapsed = String::new();
+  let mut last_was_blank = true;
+  for line in input.lines() {
+    let is_blank = line.trim().is_empty();
+    if is_blank {
+      if !last_was_blank {
+        collapsed.push('\n');
+      }
+      last_was_blank = true;
+      continue;
+    }
+    if !collapsed.is_empty() && !last_was_blank {
+      collapsed.push('\n');
+    }
+    collapsed.push_str(line.trim_end());
+    last_was_blank = false;
+  }
+  collapsed
 }
 
 async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -> Result<(), String> {
@@ -715,8 +1009,8 @@ async fn is_job_cancelled(state: &AppState, job_id: uuid::Uuid) -> Result<bool, 
 mod tests {
   use super::{
     AttemptResult, build_download_args, expand_tilde_path, extract_output_path_line,
-    is_auth_error_line, map_video_info, parse_subtitle_tracks, resolve_output_dir_from,
-    should_retry_with_browser_cookies,
+    is_auth_error_line, map_video_info, normalize_subtitle_text, parse_subtitle_tracks,
+    resolve_output_dir_from, should_retry_with_browser_cookies,
   };
   use crate::models::{DownloadFormat, SubtitleSource};
   use serde_json::json;
@@ -909,5 +1203,65 @@ mod tests {
       extract_output_path_line("[download] /tmp/demo.mp4 has already been downloaded"),
       Some("/tmp/demo.mp4".to_string())
     );
+  }
+
+  #[test]
+  fn normalize_subtitle_text_strips_srt_metadata() {
+    let input = r#"1
+00:00:01,000 --> 00:00:03,000
+<i>Hello</i> world.
+
+2
+00:00:04,000 --> 00:00:05,000
+Next line.
+"#;
+    let output = normalize_subtitle_text(input, &DownloadFormat::Srt);
+    assert_eq!(output, "Hello world.\nNext line.");
+  }
+
+  #[test]
+  fn normalize_subtitle_text_strips_vtt_metadata() {
+    let input = r#"WEBVTT
+
+NOTE This is a note
+ignored text
+
+00:00:01.000 --> 00:00:03.000
+<c.green>Hello</c>
+
+STYLE
+::cue { color: lime; }
+
+00:00:04.000 --> 00:00:05.000
+World
+"#;
+    let output = normalize_subtitle_text(input, &DownloadFormat::Vtt);
+    assert_eq!(output, "Hello\nWorld");
+  }
+
+  #[test]
+  fn normalize_subtitle_text_preserves_numeric_srt_dialogue() {
+    let input = r#"1
+00:00:01,000 --> 00:00:03,000
+2024
+911
+"#;
+    let output = normalize_subtitle_text(input, &DownloadFormat::Srt);
+    assert_eq!(output, "2024\n911");
+  }
+
+  #[test]
+  fn normalize_subtitle_text_preserves_numeric_vtt_dialogue() {
+    let input = r#"WEBVTT
+
+00:00:01.000 --> 00:00:02.000
+10
+
+2
+00:00:03.000 --> 00:00:04.000
+20
+"#;
+    let output = normalize_subtitle_text(input, &DownloadFormat::Vtt);
+    assert_eq!(output, "10\n20");
   }
 }
