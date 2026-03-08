@@ -12,6 +12,7 @@ const FFMPEG_MACOS_ZIP: &str = "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip
 const FFMPEG_WINDOWS_ZIP: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
 const FFMPEG_LINUX_AMD64_TAR_XZ: &str = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz";
 const FFMPEG_LINUX_I686_TAR_XZ: &str = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-i686-static.tar.xz";
+const FFMPEG_LINUX_ARM64_TAR_XZ: &str = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz";
 
 fn target_suffixed_name(name: &str) -> String {
   const TARGET_TRIPLE: &str = env!("TAURI_ENV_TARGET_TRIPLE");
@@ -123,10 +124,8 @@ async fn repair_ffmpeg(target_dir: &Path) -> Result<(), String> {
     FFMPEG_WINDOWS_ZIP
   } else if cfg!(target_os = "macos") {
     FFMPEG_MACOS_ZIP
-  } else if cfg!(target_arch = "x86_64") {
-    FFMPEG_LINUX_AMD64_TAR_XZ
   } else {
-    FFMPEG_LINUX_I686_TAR_XZ
+    ffmpeg_linux_archive_url(std::env::consts::ARCH)?
   };
 
   download_to_path(url, &archive_path).await?;
@@ -161,15 +160,7 @@ async fn download_to_path(url: &str, destination: &Path) -> Result<(), String> {
 fn extract_archive(archive_path: &Path, extract_dir: &Path) -> Result<(), String> {
   let status = if cfg!(target_os = "windows") {
     Command::new("powershell")
-      .args([
-        "-NoProfile",
-        "-Command",
-        &format!(
-          "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-          archive_path.display(),
-          extract_dir.display()
-        ),
-      ])
+      .args(windows_expand_archive_args(archive_path, extract_dir))
       .status()
   } else if cfg!(target_os = "macos") {
     Command::new("unzip")
@@ -187,6 +178,26 @@ fn extract_archive(archive_path: &Path, extract_dir: &Path) -> Result<(), String
   }
 
   Ok(())
+}
+
+fn ffmpeg_linux_archive_url(arch: &str) -> Result<&'static str, String> {
+  match arch {
+    "x86_64" => Ok(FFMPEG_LINUX_AMD64_TAR_XZ),
+    "x86" | "i686" => Ok(FFMPEG_LINUX_I686_TAR_XZ),
+    "aarch64" => Ok(FFMPEG_LINUX_ARM64_TAR_XZ),
+    other => Err(format!("unsupported linux architecture: {other}")),
+  }
+}
+
+fn windows_expand_archive_args(archive_path: &Path, extract_dir: &Path) -> Vec<String> {
+  vec![
+    "-NoProfile".to_string(),
+    "-Command".to_string(),
+    "Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force".to_string(),
+    "--".to_string(),
+    archive_path.to_string_lossy().to_string(),
+    extract_dir.to_string_lossy().to_string(),
+  ]
 }
 
 fn find_file_by_name(root: &Path, expected: &str) -> Option<PathBuf> {
@@ -239,5 +250,42 @@ fn ffmpeg_binary_name() -> &'static str {
     "ffmpeg.exe"
   } else {
     "ffmpeg"
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{
+    ffmpeg_linux_archive_url, windows_expand_archive_args, FFMPEG_LINUX_AMD64_TAR_XZ,
+    FFMPEG_LINUX_ARM64_TAR_XZ, FFMPEG_LINUX_I686_TAR_XZ,
+  };
+  use std::path::Path;
+
+  #[test]
+  fn linux_archive_url_selects_expected_variants() {
+    assert_eq!(ffmpeg_linux_archive_url("x86_64").unwrap(), FFMPEG_LINUX_AMD64_TAR_XZ);
+    assert_eq!(ffmpeg_linux_archive_url("x86").unwrap(), FFMPEG_LINUX_I686_TAR_XZ);
+    assert_eq!(ffmpeg_linux_archive_url("i686").unwrap(), FFMPEG_LINUX_I686_TAR_XZ);
+    assert_eq!(ffmpeg_linux_archive_url("aarch64").unwrap(), FFMPEG_LINUX_ARM64_TAR_XZ);
+  }
+
+  #[test]
+  fn linux_archive_url_rejects_unsupported_arch() {
+    let error = ffmpeg_linux_archive_url("armv7").unwrap_err();
+    assert!(error.contains("unsupported linux architecture"));
+  }
+
+  #[test]
+  fn windows_expand_archive_uses_literal_path_arguments() {
+    let args = windows_expand_archive_args(Path::new("C:\\Users\\o'connor\\archive.zip"), Path::new("C:\\tmp\\extract"));
+    assert_eq!(args[0], "-NoProfile");
+    assert_eq!(args[1], "-Command");
+    assert_eq!(
+      args[2],
+      "Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force"
+    );
+    assert_eq!(args[3], "--");
+    assert_eq!(args[4], "C:\\Users\\o'connor\\archive.zip");
+    assert_eq!(args[5], "C:\\tmp\\extract");
   }
 }
