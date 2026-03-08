@@ -16,15 +16,23 @@ pub fn run() {
   tauri::Builder::default()
     .plugin(tauri_plugin_shell::init())
     .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_notification::init())
     .setup(|app| {
       let state = AppState::new();
       app.manage(state.clone());
 
       let app_handle = app.handle().clone();
+      let state_for_server = state.clone();
       tauri::async_runtime::spawn(async move {
-        if let Err(error) = start_http_server(app_handle, state).await {
+        if let Err(error) = start_http_server(app_handle, state_for_server).await {
           error!("http server failed: {error}");
         }
+      });
+
+      let repair_app = app.handle().clone();
+      let repair_state = state.clone();
+      tauri::async_runtime::spawn(async move {
+        crate::binaries::ensure_engine_binaries_ready(repair_app, repair_state).await;
       });
 
       Ok(())

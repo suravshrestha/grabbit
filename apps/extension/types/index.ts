@@ -1,6 +1,7 @@
 import type {
   CopySubtitleRequest,
   CopySubtitleResponse,
+  DesktopHealth,
   DownloadJob,
   DownloadRequest,
   VideoInfo,
@@ -21,4 +22,11 @@ export interface HealthResponse {
   version: string
 }
 
-export type { CopySubtitleRequest, CopySubtitleResponse, DownloadJob, DownloadRequest, VideoInfo }
+export type {
+  CopySubtitleRequest,
+  CopySubtitleResponse,
+  DesktopHealth,
+  DownloadJob,
+  DownloadRequest,
+  VideoInfo,
+}

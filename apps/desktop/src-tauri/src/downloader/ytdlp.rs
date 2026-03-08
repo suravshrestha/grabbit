@@ -8,14 +8,16 @@ use crate::{
 use chrono::Utc;
 use serde_json::Value;
 use std::{
+  io::ErrorKind,
   path::{Path, PathBuf},
   time::SystemTime,
 };
 use tauri::{AppHandle, Emitter};
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_shell::{process::CommandEvent, ShellExt};
 use thiserror::Error;
 use tokio::fs;
-use tracing::error;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 struct AttemptResult {
@@ -23,6 +25,7 @@ struct AttemptResult {
   cancelled: bool,
   last_error_line: Option<String>,
   auth_error_detected: bool,
+  format_unavailable_detected: bool,
 }
 
 #[derive(Error, Debug)]
@@ -146,7 +149,7 @@ pub async fn fetch_subtitle_text(
   let marker = Uuid::new_v4().to_string();
   let output_template = temp_dir.join(format!("{marker}.%(ext)s"));
 
-  let mut args = build_download_args(url, format, None, subtitle_lang, subtitle_source);
+  let mut args = build_download_args(url, format, None, None, true, subtitle_lang, subtitle_source);
   args.extend([
     "-o".to_string(),
     output_template.to_string_lossy().to_string(),
@@ -219,6 +222,7 @@ async fn run_subtitle_fetch_attempt(
     cancelled: false,
     last_error_line,
     auth_error_detected,
+    format_unavailable_detected: false,
   })
 }
 
@@ -469,6 +473,8 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
     &request.url,
     &request.format,
     request.quality.as_deref(),
+    request.audio_bitrate_kbps,
+    request.embed_thumbnail.unwrap_or(true),
     request.subtitle_lang.as_deref(),
     request.subtitle_source.as_ref(),
   );
@@ -503,6 +509,7 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
   let retry_with_cookies = should_retry_with_browser_cookies(&first_attempt);
   let mut success = first_attempt.success;
   let mut final_error_line = first_attempt.last_error_line;
+  let mut format_unavailable_detected = first_attempt.format_unavailable_detected;
   if retry_with_cookies {
     let mut cookie_args = base_args;
     cookie_args.extend(["--cookies-from-browser".to_string(), "chrome".to_string()]);
@@ -533,7 +540,47 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
     }
 
     success = second_attempt.success;
+    format_unavailable_detected = format_unavailable_detected || second_attempt.format_unavailable_detected;
     final_error_line = second_attempt.last_error_line.or(final_error_line);
+  }
+
+  if !success && matches!(request.format, DownloadFormat::Mp4) && format_unavailable_detected {
+    let mut relaxed_args = build_relaxed_mp4_args(&request.url);
+    relaxed_args.extend([
+      "-o".to_string(),
+      output_template.clone(),
+      "--newline".to_string(),
+    ]);
+    let fallback_attempt = match run_ytdlp_attempt(
+      &app,
+      &state,
+      job_id,
+      ytdlp.to_string_lossy().to_string(),
+      relaxed_args,
+    )
+    .await
+    {
+      Ok(result) => result,
+      Err(error) => {
+        mark_job_failed(
+          &app,
+          &state,
+          job_id,
+          DownloaderError::Process(error.to_string()).to_string(),
+        )
+        .await?;
+        return Ok(());
+      }
+    };
+
+    if fallback_attempt.cancelled || is_job_cancelled(&state, job_id).await? {
+      return Ok(());
+    }
+
+    success = fallback_attempt.success;
+    format_unavailable_detected =
+      format_unavailable_detected || fallback_attempt.format_unavailable_detected;
+    final_error_line = fallback_attempt.last_error_line.or(final_error_line);
   }
 
   if success {
@@ -546,8 +593,13 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
       job.clone()
     };
     let _ = app.emit(EVENT_DOWNLOAD_COMPLETE, &completed);
+    send_terminal_notification(&app, &completed, None);
   } else {
-    let error_message = final_error_line.unwrap_or_else(|| "yt-dlp failed".to_string());
+    let error_message = if format_unavailable_detected {
+      "Requested quality format was unavailable. Grabbit attempted fallback automatically. Try Best Available if this persists.".to_string()
+    } else {
+      final_error_line.unwrap_or_else(|| "yt-dlp failed".to_string())
+    };
     let failed = {
       let mut jobs = state.jobs.lock().await;
       let job = jobs.get_mut(&job_id).ok_or_else(|| "job not found".to_string())?;
@@ -557,6 +609,7 @@ async fn run_download_job(app: AppHandle, state: AppState, job_id: uuid::Uuid) -
       job.clone()
     };
     let _ = app.emit(EVENT_DOWNLOAD_ERROR, &failed);
+    send_terminal_notification(&app, &failed, failed.error.as_deref());
   }
 
   Ok(())
@@ -581,6 +634,7 @@ async fn run_ytdlp_attempt(
   let mut cancelled = false;
   let mut last_error_line: Option<String> = None;
   let mut auth_error_detected = false;
+  let mut format_unavailable_detected = false;
 
   while let Some(event) = rx.recv().await {
     if is_job_cancelled(state, job_id).await? {
@@ -588,6 +642,9 @@ async fn run_ytdlp_attempt(
         if let Err(err) = process.kill() {
           error!("failed to kill process after cancellation: {err}");
         }
+      }
+      if let Err(err) = cleanup_cancelled_download_artifacts(state, job_id).await {
+        warn!("failed to clean up cancelled download artifacts: {err}");
       }
       cancelled = true;
       break;
@@ -598,6 +655,9 @@ async fn run_ytdlp_attempt(
         let line = String::from_utf8_lossy(&bytes).to_string();
         if is_auth_error_line(&line) {
           auth_error_detected = true;
+        }
+        if is_format_unavailable_line(&line) {
+          format_unavailable_detected = true;
         }
         if let Some(error_line) = extract_error_line(&line) {
           last_error_line = Some(error_line);
@@ -663,6 +723,7 @@ async fn run_ytdlp_attempt(
     cancelled,
     last_error_line,
     auth_error_detected,
+    format_unavailable_detected,
   })
 }
 
@@ -743,6 +804,59 @@ fn normalize_output_path(raw: &str) -> Option<String> {
   Some(trimmed.to_string())
 }
 
+pub async fn cleanup_cancelled_download_artifacts(
+  state: &AppState,
+  job_id: uuid::Uuid,
+) -> Result<(), String> {
+  let job = {
+    let jobs = state.jobs.lock().await;
+    jobs
+      .get(&job_id)
+      .cloned()
+      .ok_or_else(|| "job not found".to_string())?
+  };
+
+  if !matches!(job.status, DownloadStatus::Cancelled) {
+    return Ok(());
+  }
+
+  let Some(output_path) = job.output_path else {
+    return Ok(());
+  };
+
+  for artifact_path in cancellation_artifact_candidates(Path::new(&output_path)) {
+    if let Err(error) = fs::remove_file(&artifact_path).await {
+      if error.kind() != ErrorKind::NotFound {
+        warn!(
+          "failed to remove cancelled artifact '{}': {error}",
+          artifact_path.display()
+        );
+      }
+    }
+  }
+
+  Ok(())
+}
+
+fn cancellation_artifact_candidates(output_path: &Path) -> Vec<PathBuf> {
+  let mut candidates = vec![
+    PathBuf::from(format!("{}.part", output_path.to_string_lossy())),
+    PathBuf::from(format!("{}.ytdl", output_path.to_string_lossy())),
+  ];
+
+  if output_path
+    .extension()
+    .and_then(|value| value.to_str())
+    .is_some_and(|value| value.eq_ignore_ascii_case("part") || value.eq_ignore_ascii_case("ytdl"))
+  {
+    candidates.push(output_path.to_path_buf());
+  }
+
+  candidates.sort();
+  candidates.dedup();
+  candidates
+}
+
 fn is_auth_error_line(line: &str) -> bool {
   let message = line.to_ascii_lowercase();
   let patterns = [
@@ -759,10 +873,18 @@ fn is_auth_error_line(line: &str) -> bool {
   patterns.iter().any(|pattern| message.contains(pattern))
 }
 
+fn is_format_unavailable_line(line: &str) -> bool {
+  line
+    .to_ascii_lowercase()
+    .contains("requested format is not available")
+}
+
 fn build_download_args(
   url: &str,
   format: &DownloadFormat,
   quality: Option<&str>,
+  audio_bitrate_kbps: Option<u16>,
+  embed_thumbnail: bool,
   subtitle_lang: Option<&str>,
   subtitle_source: Option<&SubtitleSource>,
 ) -> Vec<String> {
@@ -778,19 +900,23 @@ fn build_download_args(
       };
       args.extend([
         "-f".to_string(),
-        format!("bestvideo[height<={height}]+bestaudio"),
+        format!("bv*[height<={height}]+ba/b[height<={height}]/best"),
         "--merge-output-format".to_string(),
         "mp4".to_string(),
       ]);
     }
     DownloadFormat::Mp3 => {
+      let bitrate = audio_bitrate_kbps.unwrap_or(320);
       args.extend([
         "-x".to_string(),
         "--audio-format".to_string(),
         "mp3".to_string(),
         "--audio-quality".to_string(),
-        "0".to_string(),
+        format!("{bitrate}K"),
       ]);
+      if embed_thumbnail {
+        args.push("--embed-thumbnail".to_string());
+      }
     }
     DownloadFormat::Srt | DownloadFormat::Vtt => {
       let lang = subtitle_lang.unwrap_or("en");
@@ -809,6 +935,39 @@ fn build_download_args(
     }
   }
   args
+}
+
+fn build_relaxed_mp4_args(url: &str) -> Vec<String> {
+  vec![
+    url.to_string(),
+    "-f".to_string(),
+    "bv*+ba/best".to_string(),
+    "--merge-output-format".to_string(),
+    "mp4".to_string(),
+  ]
+}
+
+fn send_terminal_notification(app: &AppHandle, job: &crate::models::DownloadJob, error: Option<&str>) {
+  let title = if error.is_some() {
+    "Grabbit download failed"
+  } else {
+    "Grabbit download complete"
+  };
+  let body = if let Some(message) = error {
+    message.to_string()
+  } else {
+    job
+      .filename
+      .clone()
+      .unwrap_or_else(|| "Your file is ready.".to_string())
+  };
+
+  let _ = app
+    .notification()
+    .builder()
+    .title(title)
+    .body(body)
+    .show();
 }
 
 fn map_video_info(video_id: &str, payload: &Value) -> VideoInfo {
@@ -1008,12 +1167,14 @@ async fn is_job_cancelled(state: &AppState, job_id: uuid::Uuid) -> Result<bool, 
 #[cfg(test)]
 mod tests {
   use super::{
-    AttemptResult, build_download_args, expand_tilde_path, extract_output_path_line,
-    is_auth_error_line, map_video_info, normalize_subtitle_text, parse_subtitle_tracks,
-    resolve_output_dir_from, should_retry_with_browser_cookies,
+    AttemptResult, build_download_args, build_relaxed_mp4_args,
+    cancellation_artifact_candidates, expand_tilde_path, extract_output_path_line,
+    is_auth_error_line, is_format_unavailable_line, map_video_info, normalize_subtitle_text,
+    parse_subtitle_tracks, resolve_output_dir_from, should_retry_with_browser_cookies,
   };
   use crate::models::{DownloadFormat, SubtitleSource};
   use serde_json::json;
+  use std::path::{Path, PathBuf};
 
   #[test]
   fn parse_subtitle_tracks_collects_manual_and_auto_sorted() {
@@ -1073,6 +1234,8 @@ mod tests {
       "https://example.com/video",
       &DownloadFormat::Srt,
       None,
+      None,
+      true,
       Some("en"),
       Some(&SubtitleSource::Manual),
     );
@@ -1089,6 +1252,8 @@ mod tests {
       "https://example.com/video",
       &DownloadFormat::Vtt,
       None,
+      None,
+      true,
       Some("en"),
       Some(&SubtitleSource::Auto),
     );
@@ -1097,6 +1262,23 @@ mod tests {
     assert!(args.contains(&"--no-write-subs".to_string()));
     assert!(!args.contains(&"--write-subs".to_string()));
     assert!(args.contains(&"vtt".to_string()));
+  }
+
+  #[test]
+  fn build_download_args_uses_selected_mp3_bitrate_and_thumbnail_embedding() {
+    let args = build_download_args(
+      "https://example.com/video",
+      &DownloadFormat::Mp3,
+      None,
+      Some(192),
+      true,
+      None,
+      None,
+    );
+
+    assert!(args.contains(&"--audio-quality".to_string()));
+    assert!(args.contains(&"192K".to_string()));
+    assert!(args.contains(&"--embed-thumbnail".to_string()));
   }
 
   #[test]
@@ -1163,12 +1345,50 @@ mod tests {
   }
 
   #[test]
+  fn is_format_unavailable_line_detects_requested_format_error() {
+    assert!(is_format_unavailable_line(
+      "ERROR: Requested format is not available. Use --list-formats for a list of available formats"
+    ));
+  }
+
+  #[test]
+  fn build_download_args_uses_mp4_fallback_chain() {
+    let args = build_download_args(
+      "https://example.com/video",
+      &DownloadFormat::Mp4,
+      Some("1080p"),
+      None,
+      true,
+      None,
+      None,
+    );
+
+    assert!(args.contains(&"-f".to_string()));
+    assert!(args.contains(&"bv*[height<=1080]+ba/b[height<=1080]/best".to_string()));
+  }
+
+  #[test]
+  fn build_relaxed_mp4_args_uses_best_effort_selector() {
+    let args = build_relaxed_mp4_args("https://example.com/video");
+    assert!(args.contains(&"bv*+ba/best".to_string()));
+  }
+
+  #[test]
+  fn cancellation_artifact_candidates_include_part_and_ytdl() {
+    let output_path = Path::new("/tmp/demo.f399.mp4");
+    let candidates = cancellation_artifact_candidates(output_path);
+    assert!(candidates.contains(&PathBuf::from("/tmp/demo.f399.mp4.part")));
+    assert!(candidates.contains(&PathBuf::from("/tmp/demo.f399.mp4.ytdl")));
+  }
+
+  #[test]
   fn should_retry_with_browser_cookies_only_on_auth_failures() {
     let attempt = AttemptResult {
       success: false,
       cancelled: false,
       last_error_line: Some("error".to_string()),
       auth_error_detected: true,
+      format_unavailable_detected: false,
     };
     assert!(should_retry_with_browser_cookies(&attempt));
 
@@ -1177,6 +1397,7 @@ mod tests {
       cancelled: false,
       last_error_line: Some("error".to_string()),
       auth_error_detected: false,
+      format_unavailable_detected: false,
     };
     assert!(!should_retry_with_browser_cookies(&non_auth));
 
@@ -1185,6 +1406,7 @@ mod tests {
       cancelled: false,
       last_error_line: None,
       auth_error_detected: true,
+      format_unavailable_detected: false,
     };
     assert!(!should_retry_with_browser_cookies(&succeeded));
   }

@@ -36,6 +36,8 @@ pub struct DownloadRequest {
   pub url: String,
   pub format: DownloadFormat,
   pub quality: Option<String>,
+  pub audio_bitrate_kbps: Option<u16>,
+  pub embed_thumbnail: Option<bool>,
   pub subtitle_lang: Option<String>,
   pub subtitle_source: Option<SubtitleSource>,
   pub output_dir: Option<String>,
